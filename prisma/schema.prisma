@@ -1,0 +1,90 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id        String   @id @default(cuid())
+  nombre    String
+  email     String   @unique
+  password  String
+  telefono  String?
+  ciudad    String   @default("Ibagué")
+  rol       Rol      @default(CLIENTE)
+  activo    Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Relaciones
+  providerProfile       ProviderProfile?
+  bookingsComoCliente   Booking[] @relation("ClienteBookings")
+  reviewsEscritas       Review[]  @relation("ClienteReviews")
+}
+
+enum Rol {
+  CLIENTE
+  PROVEEDOR
+  ADMIN
+}
+
+model ProviderProfile {
+  id            String   @id @default(cuid())
+  userId        String   @unique
+  user          User     @relation(fields: [userId], references: [id])
+  bio           String?
+  servicios     String[] // ["aseo", "jardineria", "plomeria"]
+  tarifaPorHora Float    @default(25000) // en COP
+  ciudades      String[] @default(["Ibagué"])
+  calificacion  Float    @default(0)
+  totalReviews  Int      @default(0)
+  verificado    Boolean  @default(false)
+  disponible    Boolean  @default(true)
+  createdAt     DateTime @default(now())
+
+  bookings Booking[]
+  reviews  Review[]
+}
+
+model Booking {
+  id              String          @id @default(cuid())
+  clienteId       String
+  cliente         User            @relation("ClienteBookings", fields: [clienteId], references: [id])
+  proveedorId     String
+  proveedor       ProviderProfile @relation(fields: [proveedorId], references: [id])
+  tipoServicio    String
+  descripcion     String?
+  fechaServicio   DateTime
+  duracionHoras   Float           @default(2)
+  precioTotal     Float
+  comisionDutyJoy Float
+  estado          EstadoBooking   @default(PENDIENTE)
+  createdAt       DateTime        @default(now())
+  updatedAt       DateTime        @updatedAt
+
+  review Review?
+}
+
+enum EstadoBooking {
+  PENDIENTE
+  CONFIRMADO
+  EN_PROGRESO
+  COMPLETADO
+  CANCELADO
+}
+
+model Review {
+  id           String          @id @default(cuid())
+  bookingId    String          @unique
+  booking      Booking         @relation(fields: [bookingId], references: [id])
+  clienteId    String
+  cliente      User            @relation("ClienteReviews", fields: [clienteId], references: [id])
+  proveedorId  String
+  proveedor    ProviderProfile @relation(fields: [proveedorId], references: [id])
+  calificacion Int             // 1 a 5
+  comentario   String?
+  createdAt    DateTime        @default(now())
+}
