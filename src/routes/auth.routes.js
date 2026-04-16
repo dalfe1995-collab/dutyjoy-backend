@@ -1,10 +1,8 @@
 const router = require('express').Router();
-const { PrismaClient } = require('@prisma/client');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const verifyToken = require('../middleware/verifyToken');
-
-const prisma = new PrismaClient();
+const prisma = require('../lib/prisma');
 
 // POST /auth/register
 router.post('/register', async (req, res) => {

@@ -1,41 +1,94 @@
-const express = require('express');
-const cors = require('cors');
-const helmet = require('helmet');
-const morgan = require('morgan');
+const express    = require('express');
+const cors       = require('cors');
+const helmet     = require('helmet');
+const morgan     = require('morgan');
+const rateLimit  = require('express-rate-limit');
 require('dotenv').config();
 
 const app = express();
 
-// Middlewares
+// ── Seguridad: Helmet + CORS ──────────────────────────────────────────────
 app.use(helmet());
-app.use(cors());
-app.use(morgan('dev'));
-app.use(express.json());
 
-// Rutas
-app.use('/auth', require('./routes/auth.routes'));
+const allowedOrigins = process.env.ALLOWED_ORIGINS
+  ? process.env.ALLOWED_ORIGINS.split(',').map(o => o.trim())
+  : ['http://localhost:5173', 'http://localhost:3001'];
+
+app.use(cors({
+  origin: (origin, cb) => {
+    // Permitir requests sin origin (Postman, mobile, etc.)
+    if (!origin || allowedOrigins.includes(origin)) return cb(null, true);
+    cb(new Error(`CORS bloqueado para origin: ${origin}`));
+  },
+  credentials: true,
+}));
+
+// ── Rate Limiting ─────────────────────────────────────────────────────────
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,   // 15 minutos
+  max: 20,                      // max 20 intentos de login/registro
+  message: { error: 'Demasiados intentos. Espera 15 minutos.' },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+const apiLimiter = rateLimit({
+  windowMs: 1 * 60 * 1000,     // 1 minuto
+  max: 120,                     // 120 requests por minuto por IP
+  message: { error: 'Demasiadas peticiones. Intenta más tarde.' },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+app.use('/auth/login',    authLimiter);
+app.use('/auth/register', authLimiter);
+app.use('/api',           apiLimiter);
+
+// ── Logging + Body ────────────────────────────────────────────────────────
+app.use(morgan(process.env.NODE_ENV === 'production' ? 'combined' : 'dev'));
+app.use(express.json({ limit: '10kb' }));   // Límite de body para evitar ataques
+
+// ── Rutas ─────────────────────────────────────────────────────────────────
+app.use('/auth',      require('./routes/auth.routes'));
 app.use('/providers', require('./routes/providers.routes'));
-app.use('/services', require('./routes/services.routes'));
-app.use('/bookings', require('./routes/bookings.routes'));
+app.use('/services',  require('./routes/services.routes'));
+app.use('/bookings',  require('./routes/bookings.routes'));
+app.use('/reviews',   require('./routes/reviews.routes'));
+app.use('/payments',  require('./routes/payments.routes'));
+app.use('/admin',     require('./routes/admin.routes'));
 
-// Ruta de salud — verificar que el servidor está vivo
+// ── Health check ──────────────────────────────────────────────────────────
 app.get('/health', (req, res) => {
   res.json({
     status: 'ok',
     project: 'DutyJoy Backend',
     version: '1.0.0',
-    timestamp: new Date().toISOString()
+    env: process.env.NODE_ENV,
+    timestamp: new Date().toISOString(),
   });
 });
 
-// Manejo de errores global
+// ── 404 ───────────────────────────────────────────────────────────────────
+app.use((req, res) => {
+  res.status(404).json({ error: `Ruta no encontrada: ${req.method} ${req.path}` });
+});
+
+// ── Error handler global ──────────────────────────────────────────────────
 app.use((err, req, res, next) => {
-  console.error(err.stack);
-  res.status(500).json({ error: 'Error interno del servidor' });
+  // Error de CORS
+  if (err.message?.startsWith('CORS')) {
+    return res.status(403).json({ error: err.message });
+  }
+  console.error(`[ERROR] ${err.stack}`);
+  res.status(err.status || 500).json({
+    error: process.env.NODE_ENV === 'production'
+      ? 'Error interno del servidor'
+      : err.message,
+  });
 });
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(`DutyJoy API corriendo en http://localhost:${PORT}`);
-  console.log(`Verificar salud: GET http://localhost:${PORT}/health`);
+  console.log(`✅  DutyJoy API  →  http://localhost:${PORT}  [${process.env.NODE_ENV}]`);
+  console.log(`📋  Endpoints: /auth /providers /bookings /reviews /payments /admin`);
 });

@@ -1,30 +1,59 @@
 const router = require('express').Router();
-const { PrismaClient } = require('@prisma/client');
 const verifyToken = require('../middleware/verifyToken');
+const prisma = require('../lib/prisma');
 
-const prisma = new PrismaClient();
-
-// GET /providers — listar proveedores disponibles
+// GET /providers — listar proveedores disponibles con filtros
 router.get('/', async (req, res) => {
   try {
-    const { ciudad, servicio } = req.query;
+    const { ciudad, servicio, minCalificacion, maxTarifa, page = 1, limit = 12 } = req.query;
 
-    const providers = await prisma.providerProfile.findMany({
-      where: {
-        disponible: true,
-        verificado: true,
-        ...(ciudad && { ciudades: { has: ciudad } }),
-        ...(servicio && { servicios: { has: servicio } })
-      },
+    const where = {
+      disponible: true,
+      ...(ciudad && { ciudades: { has: ciudad } }),
+      ...(servicio && { servicios: { has: servicio } }),
+      ...(minCalificacion && { calificacion: { gte: parseFloat(minCalificacion) } }),
+      ...(maxTarifa && { tarifaPorHora: { lte: parseFloat(maxTarifa) } }),
+    };
+
+    const [providers, total] = await Promise.all([
+      prisma.providerProfile.findMany({
+        where,
+        include: { user: { select: { nombre: true, ciudad: true } } },
+        orderBy: { calificacion: 'desc' },
+        skip: (parseInt(page) - 1) * parseInt(limit),
+        take: parseInt(limit),
+      }),
+      prisma.providerProfile.count({ where }),
+    ]);
+
+    res.json({ providers, total, page: parseInt(page), totalPages: Math.ceil(total / parseInt(limit)) });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'Error al buscar proveedores' });
+  }
+});
+
+// GET /providers/:id — perfil público de un proveedor
+router.get('/:id', async (req, res) => {
+  try {
+    const provider = await prisma.providerProfile.findUnique({
+      where: { id: req.params.id },
       include: {
-        user: { select: { nombre: true, ciudad: true } }
+        user: { select: { nombre: true, ciudad: true, createdAt: true } },
+        reviews: {
+          include: { cliente: { select: { nombre: true } } },
+          orderBy: { createdAt: 'desc' },
+          take: 10,
+        },
       },
-      orderBy: { calificacion: 'desc' }
     });
 
-    res.json(providers);
+    if (!provider) return res.status(404).json({ error: 'Proveedor no encontrado' });
+
+    res.json(provider);
   } catch (error) {
-    res.status(500).json({ error: 'Error al buscar proveedores' });
+    console.error(error);
+    res.status(500).json({ error: 'Error al obtener proveedor' });
   }
 });
 
@@ -39,11 +68,18 @@ router.put('/me', verifyToken, async (req, res) => {
 
     const profile = await prisma.providerProfile.update({
       where: { userId: req.user.id },
-      data: { bio, servicios, tarifaPorHora, ciudades, disponible }
+      data: {
+        ...(bio !== undefined && { bio }),
+        ...(servicios !== undefined && { servicios }),
+        ...(tarifaPorHora !== undefined && { tarifaPorHora: parseFloat(tarifaPorHora) }),
+        ...(ciudades !== undefined && { ciudades }),
+        ...(disponible !== undefined && { disponible }),
+      },
     });
 
     res.json({ mensaje: 'Perfil actualizado', profile });
   } catch (error) {
+    console.error(error);
     res.status(500).json({ error: 'Error al actualizar perfil' });
   }
 });
