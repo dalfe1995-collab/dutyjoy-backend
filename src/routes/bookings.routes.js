@@ -1,6 +1,15 @@
-const router = require('express').Router();
+const router     = require('express').Router();
 const verifyToken = require('../middleware/verifyToken');
-const prisma = require('../lib/prisma');
+const prisma     = require('../lib/prisma');
+const email      = require('../lib/email');
+
+// ── Helpers ───────────────────────────────────────────────────────────
+function formatFecha(date) {
+  return new Date(date).toLocaleDateString('es-CO', {
+    weekday: 'long', year: 'numeric', month: 'long', day: 'numeric',
+    hour: '2-digit', minute: '2-digit',
+  });
+}
 
 // POST /bookings — cliente crea una reserva
 router.post('/', verifyToken, async (req, res) => {
@@ -15,11 +24,14 @@ router.post('/', verifyToken, async (req, res) => {
       return res.status(400).json({ error: 'proveedorId, tipoServicio y fechaServicio son requeridos' });
     }
 
-    const proveedor = await prisma.providerProfile.findUnique({ where: { id: proveedorId } });
+    const proveedor = await prisma.providerProfile.findUnique({
+      where: { id: proveedorId },
+      include: { user: { select: { nombre: true, email: true } } },
+    });
     if (!proveedor) return res.status(404).json({ error: 'Proveedor no encontrado' });
 
-    const horas = duracionHoras || 2;
-    const precioTotal = proveedor.tarifaPorHora * horas;
+    const horas          = duracionHoras || 2;
+    const precioTotal    = proveedor.tarifaPorHora * horas;
     const comisionDutyJoy = precioTotal * parseFloat(process.env.COMMISSION_RATE || 0.15);
 
     const booking = await prisma.booking.create({
@@ -35,8 +47,20 @@ router.post('/', verifyToken, async (req, res) => {
       },
       include: {
         proveedor: { include: { user: { select: { nombre: true, email: true } } } },
-        cliente: { select: { nombre: true, email: true } },
+        cliente:   { select: { nombre: true, email: true } },
       },
+    });
+
+    // ── Email al proveedor ────────────────────────────────────────────
+    email.reservaCreada({
+      proveedorEmail: booking.proveedor.user.email,
+      proveedorNombre: booking.proveedor.user.nombre,
+      clienteNombre:   booking.cliente.nombre,
+      tipoServicio,
+      fecha:           formatFecha(fechaServicio),
+      duracion:        horas,
+      precioTotal,
+      bookingId:       booking.id,
     });
 
     res.status(201).json({ mensaje: 'Reserva creada exitosamente', booking });
@@ -89,7 +113,7 @@ router.get('/:id', verifyToken, async (req, res) => {
     const booking = await prisma.booking.findUnique({
       where: { id: req.params.id },
       include: {
-        cliente: { select: { nombre: true, email: true, telefono: true } },
+        cliente:  { select: { nombre: true, email: true, telefono: true } },
         proveedor: { include: { user: { select: { nombre: true, ciudad: true } } } },
         review: true,
       },
@@ -97,14 +121,12 @@ router.get('/:id', verifyToken, async (req, res) => {
 
     if (!booking) return res.status(404).json({ error: 'Reserva no encontrada' });
 
-    // Solo el cliente, proveedor o admin pueden ver la reserva
-    const profile = req.user.rol === 'PROVEEDOR'
+    const profile    = req.user.rol === 'PROVEEDOR'
       ? await prisma.providerProfile.findUnique({ where: { userId: req.user.id } })
       : null;
-
-    const esCliente = booking.clienteId === req.user.id;
+    const esCliente  = booking.clienteId === req.user.id;
     const esProveedor = profile && booking.proveedorId === profile.id;
-    const esAdmin = req.user.rol === 'ADMIN';
+    const esAdmin    = req.user.rol === 'ADMIN';
 
     if (!esCliente && !esProveedor && !esAdmin) {
       return res.status(403).json({ error: 'No autorizado' });
@@ -127,22 +149,25 @@ router.patch('/:id/status', verifyToken, async (req, res) => {
       return res.status(400).json({ error: `Estado inválido. Válidos: ${estadosValidos.join(', ')}` });
     }
 
-    const booking = await prisma.booking.findUnique({ where: { id: req.params.id } });
+    const booking = await prisma.booking.findUnique({
+      where: { id: req.params.id },
+      include: {
+        cliente:  { select: { nombre: true, email: true } },
+        proveedor: { include: { user: { select: { nombre: true, email: true } } } },
+      },
+    });
     if (!booking) return res.status(404).json({ error: 'Reserva no encontrada' });
 
-    const profile = req.user.rol === 'PROVEEDOR'
+    const profile     = req.user.rol === 'PROVEEDOR'
       ? await prisma.providerProfile.findUnique({ where: { userId: req.user.id } })
       : null;
-
-    const esCliente = booking.clienteId === req.user.id;
+    const esCliente   = booking.clienteId === req.user.id;
     const esProveedor = profile && booking.proveedorId === profile.id;
-    const esAdmin = req.user.rol === 'ADMIN';
+    const esAdmin     = req.user.rol === 'ADMIN';
 
     if (!esCliente && !esProveedor && !esAdmin) {
       return res.status(403).json({ error: 'No autorizado' });
     }
-
-    // Reglas de transición de estado
     if (esCliente && !['CANCELADO'].includes(estado)) {
       return res.status(403).json({ error: 'El cliente solo puede cancelar reservas' });
     }
@@ -154,6 +179,31 @@ router.patch('/:id/status', verifyToken, async (req, res) => {
       where: { id: req.params.id },
       data: { estado },
     });
+
+    // ── Emails según nuevo estado ─────────────────────────────────────
+    const fecha = formatFecha(booking.fechaServicio);
+
+    if (estado === 'CONFIRMADO') {
+      email.reservaConfirmada({
+        clienteEmail:    booking.cliente.email,
+        clienteNombre:   booking.cliente.nombre,
+        proveedorNombre: booking.proveedor.user.nombre,
+        tipoServicio:    booking.tipoServicio,
+        fecha,
+        precioTotal:     booking.precioTotal,
+      });
+    }
+
+    if (estado === 'COMPLETADO') {
+      email.servicioCompletado({
+        proveedorEmail:  booking.proveedor.user.email,
+        proveedorNombre: booking.proveedor.user.nombre,
+        clienteNombre:   booking.cliente.nombre,
+        tipoServicio:    booking.tipoServicio,
+        precioTotal:     booking.precioTotal,
+        comision:        booking.comisionDutyJoy,
+      });
+    }
 
     res.json({ mensaje: 'Estado actualizado', booking: updated });
   } catch (error) {

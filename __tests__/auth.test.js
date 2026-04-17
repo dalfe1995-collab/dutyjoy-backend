@@ -1,11 +1,23 @@
 const request = require('supertest');
 const app     = require('../src/app');
 
-// ── Mock de Prisma para no tocar la base de datos real ───────────────────
+// ── Mocks ────────────────────────────────────────────────────────────────
+jest.mock('../src/lib/email', () => ({
+  bienvenida:       jest.fn(),
+  reservaCreada:    jest.fn(),
+  reservaConfirmada: jest.fn(),
+  recordatorio24h:  jest.fn(),
+  servicioCompletado: jest.fn(),
+  nuevaResena:      jest.fn(),
+  resetPassword:    jest.fn(),
+}));
+
 jest.mock('../src/lib/prisma', () => ({
   user: {
     findUnique: jest.fn(),
+    findFirst:  jest.fn(),
     create:     jest.fn(),
+    update:     jest.fn(),
   },
   providerProfile: {
     create: jest.fn(),
@@ -131,7 +143,7 @@ describe('POST /auth/login', () => {
   it('inicia sesión exitosamente con credenciales correctas', async () => {
     // bcryptjs: comparar una contraseña real
     const bcrypt = require('bcryptjs');
-    const hash   = await bcrypt.hash('Password123!', 12);
+    const hash   = await bcrypt.hash('Password123!', parseInt(process.env.BCRYPT_ROUNDS || '1', 10));
     prisma.user.findUnique.mockResolvedValue({ ...usuarioCliente, password: hash });
 
     const res = await request(app).post('/auth/login').send({
@@ -147,7 +159,7 @@ describe('POST /auth/login', () => {
 
   it('rechaza con contraseña incorrecta', async () => {
     const bcrypt = require('bcryptjs');
-    const hash   = await bcrypt.hash('PasswordCorrecto!', 12);
+    const hash   = await bcrypt.hash('PasswordCorrecto!', parseInt(process.env.BCRYPT_ROUNDS || '1', 10));
     prisma.user.findUnique.mockResolvedValue({ ...usuarioCliente, password: hash });
 
     const res = await request(app).post('/auth/login').send({
@@ -209,5 +221,144 @@ describe('GET /auth/me', () => {
       .get('/auth/me')
       .set('Authorization', 'Bearer token.invalido.aqui');
     expect(res.statusCode).toBe(401);
+  });
+});
+
+// ============================================================
+describe('PUT /auth/me/password — cambiar contraseña', () => {
+// ============================================================
+
+  it('cambia la contraseña con credenciales correctas', async () => {
+    const bcrypt = require('bcryptjs');
+    const jwt    = require('jsonwebtoken');
+    const hash   = await bcrypt.hash('OldPassword!', parseInt(process.env.BCRYPT_ROUNDS || '1', 10));
+    const token  = jwt.sign(
+      { id: usuarioCliente.id, email: usuarioCliente.email, rol: usuarioCliente.rol },
+      process.env.JWT_SECRET || 'test_secret',
+      { expiresIn: '1h' },
+    );
+
+    prisma.user.findUnique.mockResolvedValue({ ...usuarioCliente, password: hash });
+    prisma.user.update.mockResolvedValue({});
+
+    const res = await request(app)
+      .put('/auth/me/password')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ passwordActual: 'OldPassword!', passwordNuevo: 'NewPassword123!' });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.body.mensaje).toMatch(/actualizada/);
+    expect(prisma.user.update).toHaveBeenCalledTimes(1);
+  });
+
+  it('rechaza si la contraseña actual es incorrecta', async () => {
+    const bcrypt = require('bcryptjs');
+    const jwt    = require('jsonwebtoken');
+    const hash   = await bcrypt.hash('CorrectPass!', 12);
+    const token  = jwt.sign(
+      { id: usuarioCliente.id, email: usuarioCliente.email, rol: usuarioCliente.rol },
+      process.env.JWT_SECRET || 'test_secret',
+      { expiresIn: '1h' },
+    );
+
+    prisma.user.findUnique.mockResolvedValue({ ...usuarioCliente, password: hash });
+
+    const res = await request(app)
+      .put('/auth/me/password')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ passwordActual: 'WrongPass!', passwordNuevo: 'NewPassword123!' });
+
+    expect(res.statusCode).toBe(401);
+    expect(res.body.error).toMatch(/incorrecta/);
+    expect(prisma.user.update).not.toHaveBeenCalled();
+  });
+
+  it('rechaza sin token (401)', async () => {
+    const res = await request(app)
+      .put('/auth/me/password')
+      .send({ passwordActual: 'x', passwordNuevo: 'y' });
+    expect(res.statusCode).toBe(401);
+  });
+});
+
+// ============================================================
+describe('POST /auth/forgot-password — solicitar reset', () => {
+// ============================================================
+
+  it('responde 200 aunque el email no exista (anti-enumeración)', async () => {
+    prisma.user.findUnique.mockResolvedValue(null);
+
+    const res = await request(app)
+      .post('/auth/forgot-password')
+      .send({ email: 'noexiste@test.com' });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.body.mensaje).toMatch(/Si el email existe/);
+    expect(prisma.user.update).not.toHaveBeenCalled();
+  });
+
+  it('guarda el token y envía email si el usuario existe', async () => {
+    prisma.user.findUnique.mockResolvedValue(usuarioCliente);
+    prisma.user.update.mockResolvedValue({});
+
+    const res = await request(app)
+      .post('/auth/forgot-password')
+      .send({ email: 'juan@test.com' });
+
+    expect(res.statusCode).toBe(200);
+    expect(prisma.user.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          resetToken:       expect.any(String),
+          resetTokenExpiry: expect.any(Date),
+        }),
+      }),
+    );
+  });
+});
+
+// ============================================================
+describe('POST /auth/reset-password — restablecer contraseña', () => {
+// ============================================================
+
+  it('restablece la contraseña con token válido', async () => {
+    prisma.user.findFirst.mockResolvedValue(usuarioCliente);
+    prisma.user.update.mockResolvedValue({});
+
+    const res = await request(app)
+      .post('/auth/reset-password')
+      .send({ token: 'token-valido-hex', passwordNuevo: 'NewSecurePass123!' });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.body.mensaje).toMatch(/restablecida/);
+    expect(prisma.user.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          resetToken:       null,
+          resetTokenExpiry: null,
+        }),
+      }),
+    );
+  });
+
+  it('rechaza con token inválido o expirado', async () => {
+    prisma.user.findFirst.mockResolvedValue(null); // token no encontrado / expirado
+
+    const res = await request(app)
+      .post('/auth/reset-password')
+      .send({ token: 'token-invalido', passwordNuevo: 'NewPass123!' });
+
+    expect(res.statusCode).toBe(400);
+    expect(res.body.error).toMatch(/inválido o expirado/);
+    expect(prisma.user.update).not.toHaveBeenCalled();
+  });
+
+  it('rechaza si faltan campos requeridos', async () => {
+    const res = await request(app)
+      .post('/auth/reset-password')
+      .send({ token: 'algun-token' }); // falta passwordNuevo
+
+    expect(res.statusCode).toBe(400);
+    expect(res.body.error).toMatch(/requeridos/);
   });
 });

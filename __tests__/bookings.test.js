@@ -2,6 +2,16 @@ const request = require('supertest');
 const jwt     = require('jsonwebtoken');
 const app     = require('../src/app');
 
+jest.mock('../src/lib/email', () => ({
+  bienvenida:        jest.fn(),
+  reservaCreada:     jest.fn(),
+  reservaConfirmada: jest.fn(),
+  recordatorio24h:   jest.fn(),
+  servicioCompletado: jest.fn(),
+  nuevaResena:       jest.fn(),
+  resetPassword:     jest.fn(),
+}));
+
 jest.mock('../src/lib/prisma', () => ({
   booking: {
     create:     jest.fn(),
@@ -49,6 +59,10 @@ const reservaBase = {
   comisionDutyJoy: 15000,
   estado:         'PENDIENTE',
   review:         null,
+  proveedor: {
+    user: { nombre: 'Carlos Plomero', email: 'carlos@test.com' },
+  },
+  cliente: { nombre: 'Juan Prueba', email: 'juan@test.com' },
 };
 
 beforeEach(() => jest.clearAllMocks());

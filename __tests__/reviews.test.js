@@ -2,6 +2,16 @@ const request = require('supertest');
 const jwt     = require('jsonwebtoken');
 const app     = require('../src/app');
 
+jest.mock('../src/lib/email', () => ({
+  bienvenida:        jest.fn(),
+  reservaCreada:     jest.fn(),
+  reservaConfirmada: jest.fn(),
+  recordatorio24h:   jest.fn(),
+  servicioCompletado: jest.fn(),
+  nuevaResena:       jest.fn(),
+  resetPassword:     jest.fn(),
+}));
+
 jest.mock('../src/lib/prisma', () => ({
   review: {
     create:   jest.fn(),
@@ -12,6 +22,9 @@ jest.mock('../src/lib/prisma', () => ({
   },
   providerProfile: {
     update: jest.fn(),
+  },
+  user: {
+    findUnique: jest.fn(),
   },
 }));
 
@@ -31,6 +44,9 @@ const reservaCompletada = {
   proveedorId: 'profile-001',
   estado:      'COMPLETADO',
   review:      null,
+  proveedor: {
+    user: { nombre: 'Carlos Plomero', email: 'carlos@test.com' },
+  },
 };
 
 const reviewCreada = {
@@ -53,6 +69,7 @@ describe('POST /reviews — crear reseña', () => {
     prisma.review.create.mockResolvedValue(reviewCreada);
     prisma.review.findMany.mockResolvedValue([reviewCreada]);
     prisma.providerProfile.update.mockResolvedValue({});
+    prisma.user.findUnique.mockResolvedValue({ nombre: 'Juan Prueba' });
 
     const res = await request(app)
       .post('/reviews')

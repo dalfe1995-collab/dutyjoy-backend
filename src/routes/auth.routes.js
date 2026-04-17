@@ -1,53 +1,58 @@
-const router = require('express').Router();
-const bcrypt = require('bcryptjs');
-const jwt = require('jsonwebtoken');
+const router      = require('express').Router();
+const bcrypt      = require('bcryptjs');
+const jwt         = require('jsonwebtoken');
+const crypto      = require('crypto');
 const verifyToken = require('../middleware/verifyToken');
-const prisma = require('../lib/prisma');
+const prisma      = require('../lib/prisma');
+const email       = require('../lib/email');
+
+const BCRYPT_ROUNDS = parseInt(process.env.BCRYPT_ROUNDS || '12', 10);
 
 // POST /auth/register
 router.post('/register', async (req, res) => {
   try {
-    const { nombre, email, password, telefono, ciudad, rol } = req.body;
+    const { nombre, email: emailAddr, password, telefono, ciudad, rol } = req.body;
 
-    if (!nombre || !email || !password) {
+    if (!nombre || !emailAddr || !password) {
       return res.status(400).json({ error: 'Nombre, email y contraseña son requeridos' });
     }
 
-    const existingUser = await prisma.user.findUnique({ where: { email } });
+    const existingUser = await prisma.user.findUnique({ where: { email: emailAddr } });
     if (existingUser) {
       return res.status(400).json({ error: 'Este email ya está registrado' });
     }
 
-    const hashedPassword = await bcrypt.hash(password, 12);
+    const hashedPassword = await bcrypt.hash(password, BCRYPT_ROUNDS);
 
     const user = await prisma.user.create({
       data: {
         nombre,
-        email,
+        email:    emailAddr,
         password: hashedPassword,
         telefono,
-        ciudad: ciudad || 'Ibagué',
-        rol: rol === 'PROVEEDOR' ? 'PROVEEDOR' : 'CLIENTE'
-      }
+        ciudad:   ciudad || 'Ibagué',
+        rol:      rol === 'PROVEEDOR' ? 'PROVEEDOR' : 'CLIENTE',
+      },
     });
 
     // Si es proveedor, crear perfil vacío automáticamente
     if (user.rol === 'PROVEEDOR') {
-      await prisma.providerProfile.create({
-        data: { userId: user.id }
-      });
+      await prisma.providerProfile.create({ data: { userId: user.id } });
     }
+
+    // Email de bienvenida (fire-and-forget)
+    email.bienvenida({ email: user.email, nombre: user.nombre, rol: user.rol });
 
     const token = jwt.sign(
       { id: user.id, email: user.email, rol: user.rol },
       process.env.JWT_SECRET,
-      { expiresIn: '7d' }
+      { expiresIn: '7d' },
     );
 
     res.status(201).json({
-      mensaje: 'Usuario registrado exitosamente',
+      mensaje:  'Usuario registrado exitosamente',
       token,
-      usuario: { id: user.id, nombre: user.nombre, email: user.email, rol: user.rol }
+      usuario:  { id: user.id, nombre: user.nombre, email: user.email, rol: user.rol },
     });
   } catch (error) {
     console.error(error);
@@ -58,9 +63,9 @@ router.post('/register', async (req, res) => {
 // POST /auth/login
 router.post('/login', async (req, res) => {
   try {
-    const { email, password } = req.body;
+    const { email: emailAddr, password } = req.body;
 
-    const user = await prisma.user.findUnique({ where: { email } });
+    const user = await prisma.user.findUnique({ where: { email: emailAddr } });
     if (!user) {
       return res.status(401).json({ error: 'Email o contraseña incorrectos' });
     }
@@ -73,12 +78,12 @@ router.post('/login', async (req, res) => {
     const token = jwt.sign(
       { id: user.id, email: user.email, rol: user.rol },
       process.env.JWT_SECRET,
-      { expiresIn: '7d' }
+      { expiresIn: '7d' },
     );
 
     res.json({
       token,
-      usuario: { id: user.id, nombre: user.nombre, email: user.email, rol: user.rol }
+      usuario: { id: user.id, nombre: user.nombre, email: user.email, rol: user.rol },
     });
   } catch (error) {
     res.status(500).json({ error: 'Error al iniciar sesión' });
@@ -89,13 +94,118 @@ router.post('/login', async (req, res) => {
 router.get('/me', verifyToken, async (req, res) => {
   try {
     const user = await prisma.user.findUnique({
-      where: { id: req.user.id },
-      include: { providerProfile: true }
+      where:   { id: req.user.id },
+      include: { providerProfile: true },
     });
-    const { password, ...userSinPassword } = user;
+    const { password, resetToken, resetTokenExpiry, ...userSinPassword } = user;
     res.json(userSinPassword);
   } catch (error) {
     res.status(500).json({ error: 'Error al obtener usuario' });
+  }
+});
+
+// PUT /auth/me/password — cambiar contraseña (requiere contraseña actual)
+router.put('/me/password', verifyToken, async (req, res) => {
+  try {
+    const { passwordActual, passwordNuevo } = req.body;
+
+    if (!passwordActual || !passwordNuevo) {
+      return res.status(400).json({ error: 'passwordActual y passwordNuevo son requeridos' });
+    }
+    if (passwordNuevo.length < 6) {
+      return res.status(400).json({ error: 'La nueva contraseña debe tener al menos 6 caracteres' });
+    }
+
+    const user = await prisma.user.findUnique({ where: { id: req.user.id } });
+    const valid = await bcrypt.compare(passwordActual, user.password);
+    if (!valid) {
+      return res.status(401).json({ error: 'La contraseña actual es incorrecta' });
+    }
+
+    const hashed = await bcrypt.hash(passwordNuevo, 12);
+    await prisma.user.update({
+      where: { id: req.user.id },
+      data:  { password: hashed },
+    });
+
+    res.json({ mensaje: 'Contraseña actualizada correctamente' });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'Error al cambiar la contraseña' });
+  }
+});
+
+// POST /auth/forgot-password — enviar email con token de reset
+router.post('/forgot-password', async (req, res) => {
+  try {
+    const { email: emailAddr } = req.body;
+
+    if (!emailAddr) {
+      return res.status(400).json({ error: 'El email es requerido' });
+    }
+
+    const user = await prisma.user.findUnique({ where: { email: emailAddr } });
+
+    // Siempre responder 200 para no revelar si el email existe (seguridad)
+    if (!user) {
+      return res.json({ mensaje: 'Si el email existe, recibirás las instrucciones en breve' });
+    }
+
+    const resetToken        = crypto.randomBytes(32).toString('hex');
+    const resetTokenExpiry  = new Date(Date.now() + 60 * 60 * 1000); // 1 hora
+
+    await prisma.user.update({
+      where: { id: user.id },
+      data:  { resetToken, resetTokenExpiry },
+    });
+
+    // Email de reset (fire-and-forget)
+    email.resetPassword({ email: user.email, nombre: user.nombre, resetToken });
+
+    res.json({ mensaje: 'Si el email existe, recibirás las instrucciones en breve' });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'Error al procesar la solicitud' });
+  }
+});
+
+// POST /auth/reset-password — establecer nueva contraseña con token
+router.post('/reset-password', async (req, res) => {
+  try {
+    const { token, passwordNuevo } = req.body;
+
+    if (!token || !passwordNuevo) {
+      return res.status(400).json({ error: 'token y passwordNuevo son requeridos' });
+    }
+    if (passwordNuevo.length < 6) {
+      return res.status(400).json({ error: 'La contraseña debe tener al menos 6 caracteres' });
+    }
+
+    const user = await prisma.user.findFirst({
+      where: {
+        resetToken:       token,
+        resetTokenExpiry: { gt: new Date() }, // token no expirado
+      },
+    });
+
+    if (!user) {
+      return res.status(400).json({ error: 'Token inválido o expirado' });
+    }
+
+    const hashed = await bcrypt.hash(passwordNuevo, 12);
+    await prisma.user.update({
+      where: { id: user.id },
+      data:  {
+        password:         hashed,
+        resetToken:       null,
+        resetTokenExpiry: null,
+      },
+    });
+
+    res.json({ mensaje: 'Contraseña restablecida correctamente. Ya puedes iniciar sesión.' });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'Error al restablecer la contraseña' });
   }
 });
 
