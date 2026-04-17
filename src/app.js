@@ -23,6 +23,7 @@ app.use(cors({
 }));
 
 // ── Rate Limiting ─────────────────────────────────────────────────────────
+// Estricto: rutas de autenticación sensibles (20 req/15min)
 const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 20,
@@ -31,17 +32,24 @@ const authLimiter = rateLimit({
   legacyHeaders: false,
 });
 
+// General: todas las demás rutas API (200 req/min)
 const apiLimiter = rateLimit({
   windowMs: 1 * 60 * 1000,
-  max: 120,
+  max: 200,
   message: { error: 'Demasiadas peticiones. Intenta más tarde.' },
   standardHeaders: true,
   legacyHeaders: false,
 });
 
-app.use('/auth/login',    authLimiter);
-app.use('/auth/register', authLimiter);
-app.use('/api',           apiLimiter);
+app.use('/auth/login',               authLimiter);
+app.use('/auth/register',            authLimiter);
+app.use('/auth/forgot-password',     authLimiter);
+app.use('/auth/resend-verification', authLimiter);
+app.use('/bookings',  apiLimiter);
+app.use('/providers', apiLimiter);
+app.use('/reviews',   apiLimiter);
+app.use('/payments',  apiLimiter);
+app.use('/admin',     apiLimiter);
 
 // ── Logging + Body ────────────────────────────────────────────────────────
 if (process.env.NODE_ENV !== 'test') {
