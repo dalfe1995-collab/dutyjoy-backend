@@ -138,6 +138,32 @@ router.get('/verify-email', async (req, res) => {
   }
 });
 
+// POST /auth/resend-verification — reenviar email de verificación (JWT)
+router.post('/resend-verification', verifyToken, async (req, res) => {
+  try {
+    const user = await prisma.user.findUnique({ where: { id: req.user.id } });
+
+    if (!user) return res.status(404).json({ error: 'Usuario no encontrado' });
+    if (user.emailVerificado) {
+      return res.json({ mensaje: 'Tu email ya está verificado' });
+    }
+
+    // Genera un token nuevo (invalida el anterior)
+    const emailVerifToken = crypto.randomBytes(32).toString('hex');
+    await prisma.user.update({
+      where: { id: user.id },
+      data:  { emailVerifToken },
+    });
+
+    email.verificarEmail({ email: user.email, nombre: user.nombre, token: emailVerifToken });
+
+    res.json({ mensaje: 'Email de verificación reenviado. Revisa tu bandeja de entrada.' });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'Error al reenviar el email' });
+  }
+});
+
 // PUT /auth/me/password — cambiar contraseña (requiere contraseña actual)
 router.put('/me/password', verifyToken, async (req, res) => {
   try {

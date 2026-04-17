@@ -79,7 +79,7 @@ router.get('/users', verifyToken, soloAdmin, async (req, res) => {
         where,
         select: {
           id: true, nombre: true, email: true, telefono: true,
-          ciudad: true, rol: true, activo: true, createdAt: true,
+          ciudad: true, rol: true, activo: true, emailVerificado: true, createdAt: true,
           providerProfile: {
             select: { calificacion: true, totalReviews: true, verificado: true, servicios: true }
           },
