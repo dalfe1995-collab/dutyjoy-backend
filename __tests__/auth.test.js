@@ -3,13 +3,16 @@ const app     = require('../src/app');
 
 // ── Mocks ────────────────────────────────────────────────────────────────
 jest.mock('../src/lib/email', () => ({
-  bienvenida:       jest.fn(),
-  reservaCreada:    jest.fn(),
+  bienvenida:        jest.fn(),
+  verificarEmail:    jest.fn().mockResolvedValue(undefined),
+  reservaCreada:     jest.fn(),
   reservaConfirmada: jest.fn(),
-  recordatorio24h:  jest.fn(),
+  recordatorio24h:   jest.fn(),
   servicioCompletado: jest.fn(),
-  nuevaResena:      jest.fn(),
-  resetPassword:    jest.fn(),
+  nuevaResena:       jest.fn(),
+  resetPassword:     jest.fn(),
+  disputaAdmin:      jest.fn().mockResolvedValue(undefined),
+  disputaCliente:    jest.fn().mockResolvedValue(undefined),
 }));
 
 jest.mock('../src/lib/prisma', () => ({
@@ -360,5 +363,46 @@ describe('POST /auth/reset-password — restablecer contraseña', () => {
 
     expect(res.statusCode).toBe(400);
     expect(res.body.error).toMatch(/requeridos/);
+  });
+});
+
+// ============================================================
+describe('GET /auth/verify-email — verificar email', () => {
+// ============================================================
+
+  it('verifica el email con token válido', async () => {
+    prisma.user.findFirst.mockResolvedValue(usuarioCliente);
+    prisma.user.update.mockResolvedValue({});
+
+    const res = await request(app)
+      .get('/auth/verify-email?token=token-valido-de-64-chars');
+
+    expect(res.statusCode).toBe(200);
+    expect(res.body.mensaje).toMatch(/verificado/);
+    expect(prisma.user.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          emailVerificado: true,
+          emailVerifToken: null,
+        }),
+      }),
+    );
+  });
+
+  it('rechaza con token inválido o ya usado', async () => {
+    prisma.user.findFirst.mockResolvedValue(null);
+
+    const res = await request(app)
+      .get('/auth/verify-email?token=token-que-no-existe');
+
+    expect(res.statusCode).toBe(400);
+    expect(res.body.error).toMatch(/inválido/);
+    expect(prisma.user.update).not.toHaveBeenCalled();
+  });
+
+  it('rechaza si no se provee token', async () => {
+    const res = await request(app).get('/auth/verify-email');
+    expect(res.statusCode).toBe(400);
+    expect(res.body.error).toMatch(/Token requerido/);
   });
 });

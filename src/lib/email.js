@@ -188,6 +188,22 @@ async function bienvenida({ email, nombre, rol }) {
 }
 
 /**
+ * Verificación de email al registrarse
+ */
+async function verificarEmail({ email, nombre, token }) {
+  const link = `${APP}/verify-email?token=${token}`;
+  const html = layout('Verifica tu email ✉️', `
+    <p>Hola <strong>${nombre}</strong>,</p>
+    <p>Gracias por registrarte en DutyJoy. Solo falta un paso: confirma tu dirección de correo haciendo clic en el botón de abajo.</p>
+    <a href="${link}" style="${BTN}">Verificar mi email →</a>
+    <p style="color:#666;font-size:13px;margin-top:24px">Este enlace expira en <strong>24 horas</strong>. Si no creaste una cuenta en DutyJoy, ignora este mensaje.</p>
+    <p style="color:#444;font-size:12px;word-break:break-all">O copia este enlace: ${link}</p>
+  `);
+
+  await send({ to: email, subject: `Verifica tu email — DutyJoy`, html });
+}
+
+/**
  * Recuperación de contraseña
  */
 async function resetPassword({ email, nombre, resetToken }) {
@@ -258,6 +274,7 @@ module.exports = {
   servicioCompletado,
   nuevaResena,
   bienvenida,
+  verificarEmail,
   resetPassword,
   disputaAdmin,
   disputaCliente,

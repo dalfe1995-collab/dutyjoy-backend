@@ -17,6 +17,8 @@ model User {
   ciudad    String   @default("Ibagué")
   rol       Rol      @default(CLIENTE)
   activo            Boolean   @default(true)
+  emailVerificado   Boolean   @default(false)
+  emailVerifToken   String?
   resetToken        String?
   resetTokenExpiry  DateTime?
   createdAt         DateTime  @default(now())

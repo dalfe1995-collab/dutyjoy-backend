@@ -24,14 +24,18 @@ router.post('/register', async (req, res) => {
 
     const hashedPassword = await bcrypt.hash(password, BCRYPT_ROUNDS);
 
+    // Token de verificación de email (24h)
+    const emailVerifToken = crypto.randomBytes(32).toString('hex');
+
     const user = await prisma.user.create({
       data: {
         nombre,
-        email:    emailAddr,
-        password: hashedPassword,
+        email:          emailAddr,
+        password:       hashedPassword,
         telefono,
-        ciudad:   ciudad || 'Ibagué',
-        rol:      rol === 'PROVEEDOR' ? 'PROVEEDOR' : 'CLIENTE',
+        ciudad:         ciudad || 'Ibagué',
+        rol:            rol === 'PROVEEDOR' ? 'PROVEEDOR' : 'CLIENTE',
+        emailVerifToken,
       },
     });
 
@@ -40,8 +44,9 @@ router.post('/register', async (req, res) => {
       await prisma.providerProfile.create({ data: { userId: user.id } });
     }
 
-    // Email de bienvenida (fire-and-forget)
+    // Emails (fire-and-forget)
     email.bienvenida({ email: user.email, nombre: user.nombre, rol: user.rol });
+    email.verificarEmail({ email: user.email, nombre: user.nombre, token: emailVerifToken });
 
     const token = jwt.sign(
       { id: user.id, email: user.email, rol: user.rol },
@@ -97,10 +102,39 @@ router.get('/me', verifyToken, async (req, res) => {
       where:   { id: req.user.id },
       include: { providerProfile: true },
     });
-    const { password, resetToken, resetTokenExpiry, ...userSinPassword } = user;
+    const { password, resetToken, resetTokenExpiry, emailVerifToken, ...userSinPassword } = user;
     res.json(userSinPassword);
   } catch (error) {
     res.status(500).json({ error: 'Error al obtener usuario' });
+  }
+});
+
+// GET /auth/verify-email?token=xxx — activar email
+router.get('/verify-email', async (req, res) => {
+  try {
+    const { token } = req.query;
+
+    if (!token) {
+      return res.status(400).json({ error: 'Token requerido' });
+    }
+
+    const user = await prisma.user.findFirst({
+      where: { emailVerifToken: token },
+    });
+
+    if (!user) {
+      return res.status(400).json({ error: 'Token inválido o ya utilizado' });
+    }
+
+    await prisma.user.update({
+      where: { id: user.id },
+      data:  { emailVerificado: true, emailVerifToken: null },
+    });
+
+    res.json({ mensaje: '¡Email verificado correctamente! Ya puedes usar todas las funciones de DutyJoy.' });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'Error al verificar el email' });
   }
 });
 
