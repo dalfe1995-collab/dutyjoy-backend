@@ -10,6 +10,8 @@ jest.mock('../src/lib/email', () => ({
   servicioCompletado: jest.fn(),
   nuevaResena:       jest.fn(),
   resetPassword:     jest.fn(),
+  disputaAdmin:      jest.fn().mockResolvedValue(undefined),
+  disputaCliente:    jest.fn().mockResolvedValue(undefined),
 }));
 
 jest.mock('../src/lib/prisma', () => ({
@@ -272,5 +274,84 @@ describe('PATCH /bookings/:id/status — cambiar estado', () => {
       .send({ estado: 'CANCELADO' });
 
     expect(res.statusCode).toBe(403);
+  });
+});
+
+// ============================================================
+describe('POST /bookings/:id/report — reportar problema', () => {
+// ============================================================
+
+  it('cliente reporta problema exitosamente', async () => {
+    prisma.booking.findUnique.mockResolvedValue(reservaBase);
+
+    const res = await request(app)
+      .post('/bookings/booking-001/report')
+      .set('Authorization', `Bearer ${tokenCliente()}`)
+      .send({ mensaje: 'El proveedor no llegó a la cita acordada' });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.body.ok).toBe(true);
+    expect(res.body.mensaje).toMatch(/24 horas/);
+  });
+
+  it('devuelve 400 si el mensaje está vacío', async () => {
+    const res = await request(app)
+      .post('/bookings/booking-001/report')
+      .set('Authorization', `Bearer ${tokenCliente()}`)
+      .send({ mensaje: '' });
+
+    expect(res.statusCode).toBe(400);
+    expect(res.body.error).toMatch(/requerido/);
+  });
+
+  it('devuelve 400 si el mensaje es muy corto', async () => {
+    const res = await request(app)
+      .post('/bookings/booking-001/report')
+      .set('Authorization', `Bearer ${tokenCliente()}`)
+      .send({ mensaje: 'Corto' });
+
+    expect(res.statusCode).toBe(400);
+    expect(res.body.error).toMatch(/10 caracteres/);
+  });
+
+  it('proveedor NO puede reportar problemas (403)', async () => {
+    const res = await request(app)
+      .post('/bookings/booking-001/report')
+      .set('Authorization', `Bearer ${tokenProveedor()}`)
+      .send({ mensaje: 'Intento de reporte no autorizado' });
+
+    expect(res.statusCode).toBe(403);
+    expect(res.body.error).toMatch(/clientes/);
+  });
+
+  it('devuelve 404 si la reserva no existe', async () => {
+    prisma.booking.findUnique.mockResolvedValue(null);
+
+    const res = await request(app)
+      .post('/bookings/no-existe/report')
+      .set('Authorization', `Bearer ${tokenCliente()}`)
+      .send({ mensaje: 'Reserva que no existe en la base de datos' });
+
+    expect(res.statusCode).toBe(404);
+  });
+
+  it('cliente no puede reportar una reserva ajena (403)', async () => {
+    const otroToken = jwt.sign({ id: 'otro-cliente-999', email: 'otro@test.com', rol: 'CLIENTE' }, SECRET, { expiresIn: '1h' });
+    prisma.booking.findUnique.mockResolvedValue(reservaBase); // clienteId = 'cliente-001'
+
+    const res = await request(app)
+      .post('/bookings/booking-001/report')
+      .set('Authorization', `Bearer ${otroToken}`)
+      .send({ mensaje: 'Intento de reportar reserva ajena sin permiso' });
+
+    expect(res.statusCode).toBe(403);
+  });
+
+  it('rechaza sin autenticación (401)', async () => {
+    const res = await request(app)
+      .post('/bookings/booking-001/report')
+      .send({ mensaje: 'Sin token de autenticación presente' });
+
+    expect(res.statusCode).toBe(401);
   });
 });

@@ -212,4 +212,56 @@ router.patch('/:id/status', verifyToken, async (req, res) => {
   }
 });
 
+// POST /bookings/:id/report — cliente reporta un problema
+router.post('/:id/report', verifyToken, async (req, res) => {
+  try {
+    if (req.user.rol !== 'CLIENTE') {
+      return res.status(403).json({ error: 'Solo los clientes pueden reportar problemas' });
+    }
+
+    const { mensaje } = req.body;
+    if (!mensaje?.trim()) {
+      return res.status(400).json({ error: 'El mensaje es requerido' });
+    }
+    if (mensaje.trim().length < 10) {
+      return res.status(400).json({ error: 'El mensaje debe tener al menos 10 caracteres' });
+    }
+
+    const booking = await prisma.booking.findUnique({
+      where: { id: req.params.id },
+      include: {
+        cliente:   { select: { nombre: true, email: true } },
+        proveedor: { include: { user: { select: { nombre: true } } } },
+      },
+    });
+
+    if (!booking) return res.status(404).json({ error: 'Reserva no encontrada' });
+    if (booking.clienteId !== req.user.id) {
+      return res.status(403).json({ error: 'No autorizado' });
+    }
+
+    // Fire-and-forget — nunca bloquea la respuesta
+    email.disputaAdmin({
+      bookingId:       booking.id,
+      clienteNombre:   booking.cliente.nombre,
+      clienteEmail:    booking.cliente.email,
+      proveedorNombre: booking.proveedor.user.nombre,
+      tipoServicio:    booking.tipoServicio,
+      fechaServicio:   booking.fechaServicio,
+      mensaje:         mensaje.trim(),
+    }).catch(() => {});
+
+    email.disputaCliente({
+      clienteEmail:  booking.cliente.email,
+      clienteNombre: booking.cliente.nombre,
+      bookingId:     booking.id,
+    }).catch(() => {});
+
+    res.json({ ok: true, mensaje: 'Reporte enviado. Te contactaremos en las próximas 24 horas hábiles.' });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'Error al enviar el reporte' });
+  }
+});
+
 module.exports = router;

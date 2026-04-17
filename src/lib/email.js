@@ -205,6 +205,52 @@ async function resetPassword({ email, nombre, resetToken }) {
 }
 
 // ════════════════════════════════════════════════════════════════════════
+// EMAILS DE DISPUTAS
+// ════════════════════════════════════════════════════════════════════════
+
+/**
+ * Al admin cuando un cliente reporta un problema con una reserva
+ */
+async function disputaAdmin({ bookingId, clienteNombre, clienteEmail, proveedorNombre, tipoServicio, fechaServicio, mensaje }) {
+  const fecha = new Date(fechaServicio).toLocaleDateString('es-CO', {
+    weekday: 'long', year: 'numeric', month: 'long', day: 'numeric',
+  });
+  const html = layout('⚠️ Problema reportado por un cliente', `
+    <p>El cliente <strong>${clienteNombre}</strong> ha reportado un problema en una reserva:</p>
+    <div style="background:#2a1a1a;border-radius:12px;padding:20px;margin:16px 0;border-left:4px solid #FF6B6B">
+      <p style="color:#e5e5e5;font-style:italic;margin:0">"${mensaje}"</p>
+    </div>
+    <table style="width:100%;border-collapse:collapse;margin:16px 0">
+      <tr><td style="padding:8px 0;color:#999">Booking ID</td><td style="padding:8px 0;font-size:12px;color:#aaa">${bookingId}</td></tr>
+      <tr><td style="padding:8px 0;color:#999">Cliente</td><td style="padding:8px 0;font-weight:600">${clienteNombre} &lt;${clienteEmail}&gt;</td></tr>
+      <tr><td style="padding:8px 0;color:#999">Proveedor</td><td style="padding:8px 0;font-weight:600">${proveedorNombre}</td></tr>
+      <tr><td style="padding:8px 0;color:#999">Servicio</td><td style="padding:8px 0;font-weight:600">${tipoServicio}</td></tr>
+      <tr><td style="padding:8px 0;color:#999">Fecha</td><td style="padding:8px 0">${fecha}</td></tr>
+    </table>
+    <p style="color:#999;font-size:13px">Responde al cliente directamente a <a href="mailto:${clienteEmail}" style="color:#FFC534">${clienteEmail}</a></p>
+  `);
+
+  await send({ to: 'admin@dutyjoy.com', subject: `⚠️ Disputa: ${clienteNombre} — reserva #${bookingId.slice(-6).toUpperCase()}`, html });
+}
+
+/**
+ * Confirmación al cliente de que su reporte fue recibido
+ */
+async function disputaCliente({ clienteEmail, clienteNombre, bookingId }) {
+  const html = layout('Reporte recibido ✅', `
+    <p>Hola <strong>${clienteNombre}</strong>,</p>
+    <p>Recibimos tu reporte sobre la reserva <strong>#${bookingId.slice(-6).toUpperCase()}</strong>.</p>
+    <p>Nuestro equipo lo revisará y te contactará en un plazo máximo de <strong>24 horas hábiles</strong>.</p>
+    <p style="color:#666;font-size:13px;margin-top:24px">
+      Si tienes más detalles que compartir, responde a este email o escríbenos a
+      <a href="mailto:info@dutyjoy.com" style="color:#FFC534">info@dutyjoy.com</a>
+    </p>
+  `);
+
+  await send({ to: clienteEmail, subject: `Reporte recibido — DutyJoy`, html });
+}
+
+// ════════════════════════════════════════════════════════════════════════
 module.exports = {
   reservaCreada,
   reservaConfirmada,
@@ -213,4 +259,6 @@ module.exports = {
   nuevaResena,
   bienvenida,
   resetPassword,
+  disputaAdmin,
+  disputaCliente,
 };
