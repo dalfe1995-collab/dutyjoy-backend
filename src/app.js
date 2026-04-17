@@ -3,6 +3,7 @@ const cors       = require('cors');
 const helmet     = require('helmet');
 const morgan     = require('morgan');
 const rateLimit  = require('express-rate-limit');
+const { Sentry } = require('./lib/sentry');
 
 const app = express();
 
@@ -75,6 +76,10 @@ app.use((req, res) => {
 
 // ── Error handler global ──────────────────────────────────────────────────
 app.use((err, req, res, next) => {
+  // Reportar a Sentry si está activo (solo errores 5xx)
+  if (process.env.SENTRY_DSN && (!err.status || err.status >= 500)) {
+    Sentry.captureException(err);
+  }
   if (err.message?.startsWith('CORS')) {
     return res.status(403).json({ error: err.message });
   }
