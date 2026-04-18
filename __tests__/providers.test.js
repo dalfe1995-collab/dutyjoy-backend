@@ -103,6 +103,36 @@ describe('GET /providers — listado público', () => {
     );
   });
 
+  it('filtra por tarifa máxima', async () => {
+    prisma.providerProfile.findMany.mockResolvedValue([perfilCompleto]);
+    prisma.providerProfile.count.mockResolvedValue(1);
+
+    const res = await request(app).get('/providers?maxTarifa=60000');
+
+    expect(res.statusCode).toBe(200);
+    expect(prisma.providerProfile.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({ tarifaPorHora: expect.objectContaining({ lte: 60000 }) }),
+      })
+    );
+  });
+
+  it('filtra por tarifa mínima y máxima (rango)', async () => {
+    prisma.providerProfile.findMany.mockResolvedValue([perfilCompleto]);
+    prisma.providerProfile.count.mockResolvedValue(1);
+
+    const res = await request(app).get('/providers?minTarifa=20000&maxTarifa=80000');
+
+    expect(res.statusCode).toBe(200);
+    expect(prisma.providerProfile.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          tarifaPorHora: expect.objectContaining({ gte: 20000, lte: 80000 }),
+        }),
+      })
+    );
+  });
+
   it('devuelve array vacío si no hay resultados', async () => {
     prisma.providerProfile.findMany.mockResolvedValue([]);
     prisma.providerProfile.count.mockResolvedValue(0);
