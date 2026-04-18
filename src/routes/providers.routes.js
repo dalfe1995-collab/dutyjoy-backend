@@ -2,6 +2,7 @@ const router = require('express').Router();
 const verifyToken = require('../middleware/verifyToken');
 const prisma = require('../lib/prisma');
 const email = require('../lib/email');
+const { SERVICIOS_IDS } = require('./services.routes');
 
 // GET /providers — listar proveedores disponibles con filtros
 router.get('/', async (req, res) => {
@@ -112,6 +113,25 @@ router.put('/me', verifyToken, async (req, res) => {
     }
 
     const { bio, servicios, tarifaPorHora, ciudades, disponible } = req.body;
+
+    // Validar servicios contra catálogo
+    if (servicios !== undefined) {
+      if (!Array.isArray(servicios)) {
+        return res.status(400).json({ error: 'servicios debe ser un array' });
+      }
+      const invalidos = servicios.filter(s => !SERVICIOS_IDS.includes(s));
+      if (invalidos.length > 0) {
+        return res.status(400).json({ error: `Servicios no válidos: ${invalidos.join(', ')}. Válidos: ${SERVICIOS_IDS.join(', ')}` });
+      }
+    }
+
+    // Validar tarifa
+    if (tarifaPorHora !== undefined) {
+      const tarifa = parseFloat(tarifaPorHora);
+      if (isNaN(tarifa) || tarifa < 5000 || tarifa > 5000000) {
+        return res.status(400).json({ error: 'La tarifa debe estar entre $5.000 y $5.000.000 COP' });
+      }
+    }
 
     const profile = await prisma.providerProfile.update({
       where: { userId: req.user.id },
