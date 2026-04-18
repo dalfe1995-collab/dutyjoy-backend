@@ -119,6 +119,18 @@ describe('POST /reviews — crear reseña', () => {
     expect(res.body.error).toMatch(/entre 1 y 5/);
   });
 
+  it('rechaza comentario de más de 1000 caracteres', async () => {
+    prisma.booking.findUnique.mockResolvedValue(reservaCompletada);
+
+    const res = await request(app)
+      .post('/reviews')
+      .set('Authorization', `Bearer ${tokenCliente()}`)
+      .send({ bookingId: 'booking-001', calificacion: 4, comentario: 'x'.repeat(1001) });
+
+    expect(res.statusCode).toBe(400);
+    expect(res.body.error).toMatch(/1000 caracteres/);
+  });
+
   it('rechaza si el cliente reseña una reserva que no es suya', async () => {
     prisma.booking.findUnique.mockResolvedValue({
       ...reservaCompletada,
