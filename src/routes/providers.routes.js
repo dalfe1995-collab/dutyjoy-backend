@@ -7,14 +7,18 @@ const { SERVICIOS_IDS } = require('./services.routes');
 // GET /providers — listar proveedores disponibles con filtros
 router.get('/', async (req, res) => {
   try {
-    const { ciudad, servicio, minCalificacion, maxTarifa, search, orden = 'calificacion_desc', page = 1, limit = 12 } = req.query;
+    const { ciudad, servicio, minCalificacion, minTarifa, maxTarifa, search, orden = 'calificacion_desc', page = 1, limit = 12 } = req.query;
+
+    const tarifaWhere = {};
+    if (minTarifa) tarifaWhere.gte = parseFloat(minTarifa);
+    if (maxTarifa) tarifaWhere.lte = parseFloat(maxTarifa);
 
     const where = {
       disponible: true,
       ...(ciudad && { ciudades: { has: ciudad } }),
       ...(servicio && { servicios: { has: servicio } }),
       ...(minCalificacion && { calificacion: { gte: parseFloat(minCalificacion) } }),
-      ...(maxTarifa && { tarifaPorHora: { lte: parseFloat(maxTarifa) } }),
+      ...(Object.keys(tarifaWhere).length > 0 && { tarifaPorHora: tarifaWhere }),
       ...(search && {
         user: {
           nombre: { contains: search, mode: 'insensitive' },
