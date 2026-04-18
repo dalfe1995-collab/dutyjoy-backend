@@ -151,10 +151,12 @@ router.patch('/users/:id', verifyToken, soloAdmin, async (req, res) => {
 // GET /admin/providers — listar proveedores con stats
 router.get('/providers', verifyToken, soloAdmin, async (req, res) => {
   try {
-    const { verificado, search, page = 1, limit = 20 } = req.query;
+    const { verificado, cedulaStatus, search, page = 1, limit = 20 } = req.query;
 
+    const estadosCedulaValidos = ['sin_enviar', 'pendiente', 'aprobado', 'rechazado'];
     const where = {
       ...(verificado !== undefined && { verificado: verificado === 'true' }),
+      ...(cedulaStatus && estadosCedulaValidos.includes(cedulaStatus) && { cedulaStatus }),
       ...(search && {
         user: {
           OR: [
