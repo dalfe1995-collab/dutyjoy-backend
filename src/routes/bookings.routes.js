@@ -186,6 +186,13 @@ router.patch('/:id/status', verifyToken, async (req, res) => {
     if (esCliente && !['CANCELADO'].includes(estado)) {
       return res.status(403).json({ error: 'El cliente solo puede cancelar reservas' });
     }
+    // Clientes no pueden cancelar con menos de 2 horas de anticipación
+    if (esCliente && estado === 'CANCELADO') {
+      const twoHoursBeforeService = new Date(booking.fechaServicio).getTime() - 2 * 60 * 60 * 1000;
+      if (Date.now() > twoHoursBeforeService) {
+        return res.status(400).json({ error: 'No puedes cancelar con menos de 2 horas de anticipación. Contacta al proveedor.' });
+      }
+    }
     if (esProveedor && !['CONFIRMADO', 'EN_PROGRESO', 'COMPLETADO', 'CANCELADO'].includes(estado)) {
       return res.status(403).json({ error: 'Transición de estado no permitida' });
     }

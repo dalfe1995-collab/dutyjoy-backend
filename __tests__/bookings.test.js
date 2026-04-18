@@ -312,6 +312,21 @@ describe('PATCH /bookings/:id/status — cambiar estado', () => {
     expect(res.statusCode).toBe(404);
   });
 
+  it('cliente NO puede cancelar con menos de 2h de anticipación (400)', async () => {
+    // fechaServicio = 30 minutos en el futuro
+    const soon = new Date(Date.now() + 30 * 60 * 1000).toISOString();
+    prisma.booking.findUnique.mockResolvedValue({ ...reservaBase, fechaServicio: soon });
+    prisma.providerProfile.findUnique.mockResolvedValue(null);
+
+    const res = await request(app)
+      .patch('/bookings/booking-001/status')
+      .set('Authorization', `Bearer ${tokenCliente()}`)
+      .send({ estado: 'CANCELADO' });
+
+    expect(res.statusCode).toBe(400);
+    expect(res.body.error).toMatch(/2 horas/);
+  });
+
   it('tercero no puede modificar una reserva ajena (403)', async () => {
     // Reserva es del cliente-001, pero el token es de otro cliente
     const otroToken = jwt.sign({ id: 'otro-cliente-999', email: 'otro@test.com', rol: 'CLIENTE' }, SECRET, { expiresIn: '1h' });
