@@ -6,7 +6,7 @@ const email = require('../lib/email');
 // GET /providers — listar proveedores disponibles con filtros
 router.get('/', async (req, res) => {
   try {
-    const { ciudad, servicio, minCalificacion, maxTarifa, search, page = 1, limit = 12 } = req.query;
+    const { ciudad, servicio, minCalificacion, maxTarifa, search, orden = 'calificacion_desc', page = 1, limit = 12 } = req.query;
 
     const where = {
       disponible: true,
@@ -21,11 +21,20 @@ router.get('/', async (req, res) => {
       }),
     };
 
+    const ordenMap = {
+      calificacion_desc: { calificacion: 'desc' },
+      calificacion_asc:  { calificacion: 'asc' },
+      tarifa_asc:        { tarifaPorHora: 'asc' },
+      tarifa_desc:       { tarifaPorHora: 'desc' },
+      recientes:         { createdAt: 'desc' },
+    };
+    const orderBy = ordenMap[orden] || { calificacion: 'desc' };
+
     const [providers, total] = await Promise.all([
       prisma.providerProfile.findMany({
         where,
         include: { user: { select: { nombre: true, ciudad: true } } },
-        orderBy: { calificacion: 'desc' },
+        orderBy,
         skip: (parseInt(page) - 1) * parseInt(limit),
         take: parseInt(limit),
       }),
