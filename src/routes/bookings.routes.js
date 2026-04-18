@@ -24,13 +24,28 @@ router.post('/', verifyToken, async (req, res) => {
       return res.status(400).json({ error: 'proveedorId, tipoServicio y fechaServicio son requeridos' });
     }
 
+    // Validar que la fecha sea futura (mínimo 1 hora desde ahora)
+    const fechaDate = new Date(fechaServicio);
+    if (isNaN(fechaDate.getTime())) {
+      return res.status(400).json({ error: 'Fecha de servicio inválida' });
+    }
+    if (fechaDate <= new Date(Date.now() + 60 * 60 * 1000)) {
+      return res.status(400).json({ error: 'La fecha del servicio debe ser al menos 1 hora en el futuro' });
+    }
+
     const proveedor = await prisma.providerProfile.findUnique({
       where: { id: proveedorId },
       include: { user: { select: { nombre: true, email: true } } },
     });
     if (!proveedor) return res.status(404).json({ error: 'Proveedor no encontrado' });
+    if (!proveedor.disponible) return res.status(400).json({ error: 'Este proveedor no está disponible actualmente' });
 
-    const horas          = duracionHoras || 2;
+    // Validar que el servicio solicitado esté en el catálogo del proveedor
+    if (proveedor.servicios?.length > 0 && !proveedor.servicios.includes(tipoServicio)) {
+      return res.status(400).json({ error: `El proveedor no ofrece el servicio "${tipoServicio}"` });
+    }
+
+    const horas          = parseFloat(duracionHoras) || 2;
     const precioTotal    = proveedor.tarifaPorHora * horas;
     const comisionDutyJoy = precioTotal * parseFloat(process.env.COMMISSION_RATE || 0.15);
 

@@ -47,6 +47,8 @@ const perfilProveedor = {
   userId:       'proveedor-001',
   tarifaPorHora: 50000,
   calificacion:  4.5,
+  disponible:    true,
+  servicios:     ['plomeria', 'electricidad'],
 };
 
 const reservaBase = {
@@ -151,6 +153,55 @@ describe('POST /bookings — crear reserva', () => {
   it('rechaza sin autenticación (401)', async () => {
     const res = await request(app).post('/bookings').send({});
     expect(res.statusCode).toBe(401);
+  });
+
+  it('rechaza fecha en el pasado (400)', async () => {
+    const res = await request(app)
+      .post('/bookings')
+      .set('Authorization', `Bearer ${tokenCliente()}`)
+      .send({
+        proveedorId:   'profile-proveedor-001',
+        tipoServicio:  'plomeria',
+        fechaServicio: '2020-01-01T09:00:00',
+        duracionHoras: 2,
+      });
+
+    expect(res.statusCode).toBe(400);
+    expect(res.body.error).toMatch(/futuro/);
+  });
+
+  it('rechaza si el proveedor no está disponible (400)', async () => {
+    prisma.providerProfile.findUnique.mockResolvedValue({ ...perfilProveedor, disponible: false });
+
+    const res = await request(app)
+      .post('/bookings')
+      .set('Authorization', `Bearer ${tokenCliente()}`)
+      .send({
+        proveedorId:   'profile-proveedor-001',
+        tipoServicio:  'plomeria',
+        fechaServicio: '2026-05-01T09:00:00',
+        duracionHoras: 2,
+      });
+
+    expect(res.statusCode).toBe(400);
+    expect(res.body.error).toMatch(/disponible/);
+  });
+
+  it('rechaza servicio que el proveedor no ofrece (400)', async () => {
+    prisma.providerProfile.findUnique.mockResolvedValue(perfilProveedor);
+
+    const res = await request(app)
+      .post('/bookings')
+      .set('Authorization', `Bearer ${tokenCliente()}`)
+      .send({
+        proveedorId:   'profile-proveedor-001',
+        tipoServicio:  'jardineria', // no está en servicios del proveedor
+        fechaServicio: '2026-05-01T09:00:00',
+        duracionHoras: 2,
+      });
+
+    expect(res.statusCode).toBe(400);
+    expect(res.body.error).toMatch(/jardineria/);
   });
 });
 
