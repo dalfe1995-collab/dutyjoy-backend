@@ -116,6 +116,112 @@ describe('GET /admin/users — listar usuarios', () => {
 });
 
 // ============================================================
+describe('GET /admin/users/:id — detalle de un usuario', () => {
+// ============================================================
+
+  const fakeUserDetail = {
+    id: 'u-1',
+    nombre: 'Juan',
+    email: 'juan@test.com',
+    rol: 'CLIENTE',
+    activo: true,
+    emailVerificado: true,
+    ciudad: 'Bogotá',
+    createdAt: new Date().toISOString(),
+    providerProfile: null,
+    bookingsComoCliente: [],
+  };
+
+  it('admin obtiene detalle completo de un usuario', async () => {
+    prisma.user.findUnique.mockResolvedValue(fakeUserDetail);
+
+    const res = await request(app)
+      .get('/admin/users/u-1')
+      .set('Authorization', `Bearer ${tokenAdmin()}`);
+
+    expect(res.statusCode).toBe(200);
+    expect(res.body.id).toBe('u-1');
+    expect(res.body.email).toBe('juan@test.com');
+    // Nunca devuelve password
+    expect(res.body.password).toBeUndefined();
+  });
+
+  it('devuelve 404 si el usuario no existe', async () => {
+    prisma.user.findUnique.mockResolvedValue(null);
+
+    const res = await request(app)
+      .get('/admin/users/no-existe')
+      .set('Authorization', `Bearer ${tokenAdmin()}`);
+
+    expect(res.statusCode).toBe(404);
+    expect(res.body.error).toMatch(/no encontrado/i);
+  });
+
+  it('cliente recibe 403', async () => {
+    const res = await request(app)
+      .get('/admin/users/u-1')
+      .set('Authorization', `Bearer ${tokenCliente()}`);
+    expect(res.statusCode).toBe(403);
+  });
+});
+
+// ============================================================
+describe('GET /admin/providers — listar proveedores CRM', () => {
+// ============================================================
+
+  const fakeProvider = {
+    id: 'prof-001',
+    userId: 'u-1',
+    verificado: false,
+    cedulaStatus: 'pendiente',
+    cedulaUrl: 'https://drive.google.com/file/d/abc/view',
+    cedulaNota: null,
+    calificacion: 4.2,
+    tarifaPorHora: 50000,
+    createdAt: new Date().toISOString(),
+    user: { nombre: 'Carlos', email: 'carlos@test.com', telefono: '3001234567', ciudad: 'Bogotá', createdAt: new Date().toISOString() },
+    _count: { bookings: 3, reviews: 2 },
+  };
+
+  it('admin lista todos los proveedores', async () => {
+    prisma.providerProfile.findMany.mockResolvedValue([fakeProvider]);
+    prisma.providerProfile.count.mockResolvedValue(1);
+
+    const res = await request(app)
+      .get('/admin/providers')
+      .set('Authorization', `Bearer ${tokenAdmin()}`);
+
+    expect(res.statusCode).toBe(200);
+    expect(res.body.providers).toHaveLength(1);
+    expect(res.body.total).toBe(1);
+    expect(res.body.providers[0].cedulaStatus).toBe('pendiente');
+  });
+
+  it('filtra por cédula pendiente', async () => {
+    prisma.providerProfile.findMany.mockResolvedValue([fakeProvider]);
+    prisma.providerProfile.count.mockResolvedValue(1);
+
+    const res = await request(app)
+      .get('/admin/providers?cedulaStatus=pendiente')
+      .set('Authorization', `Bearer ${tokenAdmin()}`);
+
+    expect(res.statusCode).toBe(200);
+  });
+
+  it('cliente recibe 403', async () => {
+    const res = await request(app)
+      .get('/admin/providers')
+      .set('Authorization', `Bearer ${tokenCliente()}`);
+    expect(res.statusCode).toBe(403);
+  });
+
+  it('sin token recibe 401', async () => {
+    const res = await request(app).get('/admin/providers');
+    expect(res.statusCode).toBe(401);
+  });
+});
+
+// ============================================================
 describe('PATCH /admin/users/:id — editar usuario', () => {
 // ============================================================
 
