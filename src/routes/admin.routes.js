@@ -1,6 +1,7 @@
 const router = require('express').Router();
 const verifyToken = require('../middleware/verifyToken');
 const prisma = require('../lib/prisma');
+const email = require('../lib/email');
 
 // Middleware: solo ADMIN
 const soloAdmin = (req, res, next) => {
@@ -23,6 +24,7 @@ router.get('/stats', verifyToken, soloAdmin, async (req, res) => {
       bookingsCancelados,
       proveedoresVerificados,
       proveedoresPendientes,
+      cedulasPendientes,
       ingresosTotales,
       comisionesDutyjoy,
     ] = await Promise.all([
@@ -35,6 +37,7 @@ router.get('/stats', verifyToken, soloAdmin, async (req, res) => {
       prisma.booking.count({ where: { estado: 'CANCELADO' } }),
       prisma.providerProfile.count({ where: { verificado: true } }),
       prisma.providerProfile.count({ where: { verificado: false } }),
+      prisma.providerProfile.count({ where: { cedulaStatus: 'pendiente' } }),
       prisma.booking.aggregate({ _sum: { precioTotal: true }, where: { estado: 'COMPLETADO' } }),
       prisma.booking.aggregate({ _sum: { comisionDutyJoy: true }, where: { estado: 'COMPLETADO' } }),
     ]);
@@ -47,7 +50,7 @@ router.get('/stats', verifyToken, soloAdmin, async (req, res) => {
         completados: bookingsCompletados,
         cancelados: bookingsCancelados,
       },
-      proveedores: { verificados: proveedoresVerificados, pendientes: proveedoresPendientes },
+      proveedores: { verificados: proveedoresVerificados, pendientes: proveedoresPendientes, cedulasPendientes },
       finanzas: {
         ingresosTotales: ingresosTotales._sum.precioTotal || 0,
         comisionesDutyjoy: comisionesDutyjoy._sum.comisionDutyJoy || 0,
@@ -169,6 +172,7 @@ router.get('/providers', verifyToken, soloAdmin, async (req, res) => {
           user: { select: { nombre: true, email: true, telefono: true, ciudad: true, createdAt: true } },
           _count: { select: { bookings: true, reviews: true } },
         },
+        // cedulaUrl, cedulaStatus, cedulaNota incluidos automáticamente (campos del modelo)
         orderBy: { createdAt: 'desc' },
         skip: (parseInt(page) - 1) * parseInt(limit),
         take: parseInt(limit),
@@ -183,19 +187,44 @@ router.get('/providers', verifyToken, soloAdmin, async (req, res) => {
   }
 });
 
-// PATCH /admin/providers/:id/verify — verificar o desverificar proveedor
+// PATCH /admin/providers/:id/verify — verificar/desverificar + aprobar/rechazar cédula
 router.patch('/providers/:id/verify', verifyToken, soloAdmin, async (req, res) => {
   try {
-    const { verificado } = req.body;
+    const { verificado, cedulaStatus, cedulaNota } = req.body;
+
+    const data = {};
+    if (verificado !== undefined) data.verificado = Boolean(verificado);
+    if (cedulaStatus && ['pendiente','aprobado','rechazado','sin_enviar'].includes(cedulaStatus)) {
+      data.cedulaStatus = cedulaStatus;
+      if (cedulaStatus === 'aprobado')  data.verificado = true;
+      if (cedulaStatus === 'rechazado') data.cedulaNota = cedulaNota || null;
+    }
 
     const profile = await prisma.providerProfile.update({
-      where: { id: req.params.id },
-      data: { verificado: Boolean(verificado) },
+      where:   { id: req.params.id },
+      data,
       include: { user: { select: { nombre: true, email: true } } },
     });
 
+    // Emails de notificación (fire-and-forget)
+    if (cedulaStatus === 'aprobado') {
+      email.cedulaAprobada({
+        proveedorEmail:  profile.user.email,
+        proveedorNombre: profile.user.nombre,
+      }).catch(() => {});
+    }
+    if (cedulaStatus === 'rechazado') {
+      email.cedulaRechazada({
+        proveedorEmail:  profile.user.email,
+        proveedorNombre: profile.user.nombre,
+        nota:            cedulaNota,
+      }).catch(() => {});
+    }
+
     res.json({
-      mensaje: `Proveedor ${verificado ? 'verificado' : 'desverificado'} exitosamente`,
+      mensaje: cedulaStatus
+        ? `Cédula marcada como ${cedulaStatus}`
+        : `Proveedor ${verificado ? 'verificado' : 'desverificado'} exitosamente`,
       profile,
     });
   } catch (error) {

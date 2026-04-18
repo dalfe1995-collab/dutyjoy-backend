@@ -6,7 +6,7 @@ const email = require('../lib/email');
 // GET /providers — listar proveedores disponibles con filtros
 router.get('/', async (req, res) => {
   try {
-    const { ciudad, servicio, minCalificacion, maxTarifa, page = 1, limit = 12 } = req.query;
+    const { ciudad, servicio, minCalificacion, maxTarifa, search, page = 1, limit = 12 } = req.query;
 
     const where = {
       disponible: true,
@@ -14,6 +14,11 @@ router.get('/', async (req, res) => {
       ...(servicio && { servicios: { has: servicio } }),
       ...(minCalificacion && { calificacion: { gte: parseFloat(minCalificacion) } }),
       ...(maxTarifa && { tarifaPorHora: { lte: parseFloat(maxTarifa) } }),
+      ...(search && {
+        user: {
+          nombre: { contains: search, mode: 'insensitive' },
+        },
+      }),
     };
 
     const [providers, total] = await Promise.all([
