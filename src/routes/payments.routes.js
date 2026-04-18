@@ -31,7 +31,9 @@ router.post('/create', verifyToken, async (req, res) => {
 
     if (!booking)                         return res.status(404).json({ error: 'Reserva no encontrada' });
     if (booking.clienteId !== req.user.id) return res.status(403).json({ error: 'No autorizado' });
-    if (booking.estado !== 'PENDIENTE')    return res.status(400).json({ error: 'Solo se pagan reservas pendientes' });
+    if (!['PENDIENTE', 'CONFIRMADO'].includes(booking.estado)) {
+      return res.status(400).json({ error: 'Solo se pueden pagar reservas pendientes o confirmadas' });
+    }
 
     const preference = new Preference(mp);
 
