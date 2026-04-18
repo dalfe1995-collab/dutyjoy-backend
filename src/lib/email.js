@@ -221,6 +221,52 @@ async function resetPassword({ email, nombre, resetToken }) {
 }
 
 // ════════════════════════════════════════════════════════════════════════
+// EMAILS DE VERIFICACIÓN DE IDENTIDAD
+// ════════════════════════════════════════════════════════════════════════
+
+/**
+ * Al proveedor cuando envía su cédula (confirmar recepción)
+ */
+async function cedulaRecibida({ proveedorEmail, proveedorNombre }) {
+  const html = layout('Documento recibido ✅', `
+    <p>Hola <strong>${proveedorNombre}</strong>,</p>
+    <p>Recibimos tu documento de identidad. Nuestro equipo lo revisará en un plazo máximo de <strong>48 horas hábiles</strong>.</p>
+    <p>Te notificaremos por correo cuando el proceso finalice.</p>
+    <a href="${APP}/dashboard" style="${BTN}">Ver mi perfil →</a>
+  `);
+  await send({ to: proveedorEmail, subject: `Documento de identidad recibido — DutyJoy`, html });
+}
+
+/**
+ * Al proveedor cuando su cédula es aprobada
+ */
+async function cedulaAprobada({ proveedorEmail, proveedorNombre }) {
+  const html = layout('¡Identidad verificada! ✅', `
+    <p>Hola <strong>${proveedorNombre}</strong>,</p>
+    <p>Tu identidad fue <strong style="color:#00C9A7">verificada exitosamente</strong>. Ahora apareces con el sello ✓ en la plataforma, lo que aumenta la confianza de los clientes.</p>
+    <p>¡Empieza a recibir reservas!</p>
+    <a href="${APP}/providers" style="${BTN}">Ver mi perfil público →</a>
+  `);
+  await send({ to: proveedorEmail, subject: `¡Tu identidad fue verificada! — DutyJoy`, html });
+}
+
+/**
+ * Al proveedor cuando su cédula es rechazada
+ */
+async function cedulaRechazada({ proveedorEmail, proveedorNombre, nota }) {
+  const html = layout('Documento no aceptado ❌', `
+    <p>Hola <strong>${proveedorNombre}</strong>,</p>
+    <p>No pudimos verificar tu documento de identidad por la siguiente razón:</p>
+    <div style="background:#2a1a1a;border-radius:12px;padding:16px 20px;margin:16px 0;border-left:4px solid #FF6B6B">
+      <p style="color:#e5e5e5;margin:0">${nota || 'El documento no es legible o no corresponde a una cédula de ciudadanía colombiana.'}</p>
+    </div>
+    <p>Por favor, sube un nuevo documento y vuelve a enviar tu solicitud.</p>
+    <a href="${APP}/dashboard" style="${BTN}">Enviar nuevo documento →</a>
+  `);
+  await send({ to: proveedorEmail, subject: `Verificación de identidad — acción requerida — DutyJoy`, html });
+}
+
+// ════════════════════════════════════════════════════════════════════════
 // EMAILS DE DISPUTAS
 // ════════════════════════════════════════════════════════════════════════
 
@@ -276,6 +322,9 @@ module.exports = {
   bienvenida,
   verificarEmail,
   resetPassword,
+  cedulaRecibida,
+  cedulaAprobada,
+  cedulaRechazada,
   disputaAdmin,
   disputaCliente,
 };

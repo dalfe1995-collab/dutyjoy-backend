@@ -48,6 +48,9 @@ model ProviderProfile {
   totalReviews  Int      @default(0)
   verificado    Boolean  @default(false)
   disponible    Boolean  @default(true)
+  cedulaUrl     String?
+  cedulaStatus  String   @default("sin_enviar") // sin_enviar | pendiente | aprobado | rechazado
+  cedulaNota    String?  // razón de rechazo (opcional)
   createdAt     DateTime @default(now())
 
   bookings Booking[]
