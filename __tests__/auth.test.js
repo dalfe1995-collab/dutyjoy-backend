@@ -228,6 +228,90 @@ describe('GET /auth/me', () => {
 });
 
 // ============================================================
+describe('PUT /auth/me — actualizar datos personales', () => {
+// ============================================================
+
+  function makeToken(user = usuarioCliente) {
+    const jwt = require('jsonwebtoken');
+    return jwt.sign(
+      { id: user.id, email: user.email, rol: user.rol },
+      process.env.JWT_SECRET || 'test_secret',
+      { expiresIn: '1h' },
+    );
+  }
+
+  it('actualiza nombre, telefono y ciudad correctamente', async () => {
+    prisma.user.update.mockResolvedValue({
+      id: usuarioCliente.id, nombre: 'Juan Actualizado',
+      email: usuarioCliente.email, telefono: '3109876543', ciudad: 'Medellín', rol: 'CLIENTE',
+    });
+
+    const res = await request(app)
+      .put('/auth/me')
+      .set('Authorization', `Bearer ${makeToken()}`)
+      .send({ nombre: 'Juan Actualizado', telefono: '3109876543', ciudad: 'Medellín' });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.body.mensaje).toMatch(/actualizado/i);
+    expect(res.body.usuario.nombre).toBe('Juan Actualizado');
+    expect(prisma.user.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ nombre: 'Juan Actualizado' }),
+      })
+    );
+  });
+
+  it('actualiza solo un campo (telefono)', async () => {
+    prisma.user.update.mockResolvedValue({ ...usuarioCliente, telefono: '3111111111' });
+
+    const res = await request(app)
+      .put('/auth/me')
+      .set('Authorization', `Bearer ${makeToken()}`)
+      .send({ telefono: '3111111111' });
+
+    expect(res.statusCode).toBe(200);
+    expect(prisma.user.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ telefono: '3111111111' }),
+      })
+    );
+    // nombre no debe estar en data si no se envió
+    const callArg = prisma.user.update.mock.calls[0][0];
+    expect(callArg.data).not.toHaveProperty('nombre');
+  });
+
+  it('rechaza nombre vacío (400)', async () => {
+    const res = await request(app)
+      .put('/auth/me')
+      .set('Authorization', `Bearer ${makeToken()}`)
+      .send({ nombre: '   ' });
+
+    expect(res.statusCode).toBe(400);
+    expect(res.body.error).toMatch(/vacío/);
+    expect(prisma.user.update).not.toHaveBeenCalled();
+  });
+
+  it('rechaza si no hay campos que actualizar (400)', async () => {
+    const res = await request(app)
+      .put('/auth/me')
+      .set('Authorization', `Bearer ${makeToken()}`)
+      .send({});
+
+    expect(res.statusCode).toBe(400);
+    expect(res.body.error).toMatch(/al menos un campo/);
+    expect(prisma.user.update).not.toHaveBeenCalled();
+  });
+
+  it('rechaza sin token (401)', async () => {
+    const res = await request(app)
+      .put('/auth/me')
+      .send({ nombre: 'Sin token' });
+
+    expect(res.statusCode).toBe(401);
+  });
+});
+
+// ============================================================
 describe('PUT /auth/me/password — cambiar contraseña', () => {
 // ============================================================
 

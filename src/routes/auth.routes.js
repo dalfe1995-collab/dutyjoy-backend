@@ -109,6 +109,36 @@ router.get('/me', verifyToken, async (req, res) => {
   }
 });
 
+// PUT /auth/me — actualizar datos personales del usuario
+router.put('/me', verifyToken, async (req, res) => {
+  try {
+    const { nombre, telefono, ciudad } = req.body;
+
+    const data = {};
+    if (nombre !== undefined) {
+      if (!nombre.trim()) return res.status(400).json({ error: 'El nombre no puede estar vacío' });
+      data.nombre = nombre.trim();
+    }
+    if (telefono !== undefined) data.telefono = telefono.trim() || null;
+    if (ciudad   !== undefined) data.ciudad   = ciudad.trim()   || null;
+
+    if (Object.keys(data).length === 0) {
+      return res.status(400).json({ error: 'Debes enviar al menos un campo para actualizar' });
+    }
+
+    const updated = await prisma.user.update({
+      where: { id: req.user.id },
+      data,
+      select: { id: true, nombre: true, email: true, telefono: true, ciudad: true, rol: true },
+    });
+
+    res.json({ mensaje: 'Perfil actualizado correctamente', usuario: updated });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'Error al actualizar el perfil' });
+  }
+});
+
 // GET /auth/verify-email?token=xxx — activar email
 router.get('/verify-email', async (req, res) => {
   try {
