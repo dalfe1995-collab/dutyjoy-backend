@@ -8,7 +8,7 @@ jest.mock('../src/lib/email', () => ({
   reservaConfirmada: jest.fn(),
   recordatorio24h:   jest.fn(),
   servicioCompletado: jest.fn(),
-  nuevaResena:       jest.fn(),
+  nuevaResena:       jest.fn().mockResolvedValue(undefined),
   resetPassword:     jest.fn(),
 }));
 

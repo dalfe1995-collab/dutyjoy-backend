@@ -15,8 +15,12 @@ router.post('/', verifyToken, async (req, res) => {
     if (!bookingId || !calificacion) {
       return res.status(400).json({ error: 'bookingId y calificacion son requeridos' });
     }
-    if (calificacion < 1 || calificacion > 5) {
+    const cal = parseInt(calificacion);
+    if (isNaN(cal) || cal < 1 || cal > 5) {
       return res.status(400).json({ error: 'La calificación debe ser entre 1 y 5' });
+    }
+    if (comentario && comentario.trim().length > 1000) {
+      return res.status(400).json({ error: 'El comentario no puede superar 1000 caracteres' });
     }
 
     const booking = await prisma.booking.findUnique({
@@ -37,7 +41,7 @@ router.post('/', verifyToken, async (req, res) => {
         bookingId,
         clienteId:   req.user.id,
         proveedorId: booking.proveedorId,
-        calificacion: parseInt(calificacion),
+        calificacion: cal,
         comentario,
       },
     });
@@ -63,9 +67,9 @@ router.post('/', verifyToken, async (req, res) => {
       proveedorEmail:  booking.proveedor.user.email,
       proveedorNombre: booking.proveedor.user.nombre,
       clienteNombre:   cliente.nombre,
-      calificacion:    parseInt(calificacion),
+      calificacion:    cal,
       comentario,
-    });
+    }).catch(() => {});
 
     res.status(201).json({ mensaje: 'Reseña publicada', review });
   } catch (error) {
