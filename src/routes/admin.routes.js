@@ -236,10 +236,18 @@ router.patch('/providers/:id/verify', verifyToken, soloAdmin, async (req, res) =
 // GET /admin/bookings — listar todas las reservas
 router.get('/bookings', verifyToken, soloAdmin, async (req, res) => {
   try {
-    const { estado, page = 1, limit = 20 } = req.query;
+    const { estado, search, page = 1, limit = 20 } = req.query;
 
     const where = {
       ...(estado && { estado }),
+      ...(search && {
+        OR: [
+          { cliente: { nombre: { contains: search, mode: 'insensitive' } } },
+          { cliente: { email:  { contains: search, mode: 'insensitive' } } },
+          { proveedor: { user: { nombre: { contains: search, mode: 'insensitive' } } } },
+          { tipoServicio: { contains: search, mode: 'insensitive' } },
+        ],
+      }),
     };
 
     const [bookings, total] = await Promise.all([
