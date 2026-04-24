@@ -240,6 +240,13 @@ router.post('/providers/:id/ai-verify', verifyToken, soloAdmin, async (req, res)
     return res.status(422).json({ error: 'No se pudo descargar el documento. Verifica que el archivo de Google Drive sea una imagen (JPG/PNG) compartida como "Cualquier persona con el enlace".' });
   }
 
+  // Verificar tamaño (OpenAI acepta max ~20MB en base64, pero para vision se recomienda < 5MB)
+  const sizeMB = (imgData.base64.length * 3 / 4) / (1024 * 1024);
+  console.log(`[ai-verify] imagen: ${imgData.mimeType}, ~${sizeMB.toFixed(2)} MB`);
+  if (sizeMB > 15) {
+    return res.status(422).json({ error: `La imagen es muy grande (${sizeMB.toFixed(1)} MB). Sube una foto más comprimida (máx ~15 MB).` });
+  }
+
   try {
     const response = await openai.chat.completions.create({
       model: 'gpt-4o',
@@ -284,8 +291,9 @@ Responde SOLO con JSON válido (sin markdown):
     res.json({ analysis });
   } catch (e) {
     if (e instanceof SyntaxError) return res.status(422).json({ error: 'La IA no pudo interpretar el documento. ¿Es una foto clara de la cédula?' });
-    console.error('[ai-verify]', e.message);
-    res.status(500).json({ error: 'Error interno al analizar el documento.' });
+    const detail = e?.response?.error?.message || e?.message || 'error desconocido';
+    console.error('[ai-verify] OpenAI error:', detail);
+    res.status(500).json({ error: `Error de OpenAI: ${detail}` });
   }
 });
 
