@@ -52,6 +52,16 @@ app.use('/reviews',   apiLimiter);
 app.use('/payments',  apiLimiter);
 app.use('/admin',     apiLimiter);
 
+// Chat: límite más estricto para controlar costos de OpenAI (30 req/min por IP)
+const chatLimiter = rateLimit({
+  windowMs: 1 * 60 * 1000,
+  max: 30,
+  message: { error: 'Demasiados mensajes. Espera un momento.' },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+app.use('/chat', chatLimiter);
+
 // ── Logging + Body ────────────────────────────────────────────────────────
 if (process.env.NODE_ENV !== 'test') {
   app.use(morgan(process.env.NODE_ENV === 'production' ? 'combined' : 'dev'));
@@ -66,6 +76,7 @@ app.use('/bookings',  require('./routes/bookings.routes'));
 app.use('/reviews',   require('./routes/reviews.routes'));
 app.use('/payments',  require('./routes/payments.routes'));
 app.use('/admin',     require('./routes/admin.routes'));
+app.use('/chat',      require('./routes/chat.routes'));
 
 // ── Health check ──────────────────────────────────────────────────────────
 app.get('/health', (req, res) => {
