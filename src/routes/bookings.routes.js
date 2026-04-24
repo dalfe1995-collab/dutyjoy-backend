@@ -2,6 +2,9 @@ const router     = require('express').Router();
 const verifyToken = require('../middleware/verifyToken');
 const prisma     = require('../lib/prisma');
 const email      = require('../lib/email');
+const OpenAI     = require('openai');
+
+const openai = process.env.OPENAI_API_KEY ? new OpenAI({ apiKey: process.env.OPENAI_API_KEY }) : null;
 
 // ── Helpers ───────────────────────────────────────────────────────────
 function formatFecha(date) {
@@ -283,6 +286,53 @@ router.post('/:id/report', verifyToken, async (req, res) => {
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: 'Error al enviar el reporte' });
+  }
+});
+
+// POST /bookings/parse — analiza texto libre y extrae campos de reserva con IA
+router.post('/parse', verifyToken, async (req, res) => {
+  if (!openai) return res.status(503).json({ error: 'IA no configurada' });
+
+  const { texto, serviciosDisponibles = [] } = req.body;
+  if (!texto || texto.trim().length < 5) {
+    return res.status(400).json({ error: 'Describe lo que necesitas (mínimo 5 caracteres)' });
+  }
+
+  const ahora = new Date().toISOString();
+  const listaServicios = serviciosDisponibles.length
+    ? serviciosDisponibles.join(', ')
+    : 'plomería, electricidad, limpieza, jardinería, pintura, cerrajería, mudanzas, aire acondicionado, carpintería, fumigación';
+
+  try {
+    const completion = await openai.chat.completions.create({
+      model: 'gpt-4o-mini',
+      max_tokens: 250,
+      temperature: 0,
+      messages: [{
+        role: 'system',
+        content: `Eres un asistente de DutyJoy (Colombia). Fecha/hora actual: ${ahora}.
+Extrae campos de reserva del texto del usuario. Responde SOLO con JSON válido (sin markdown):
+{
+  "tipoServicio": "ID del servicio de esta lista: [${listaServicios}] — elige el más apropiado o null",
+  "descripcion": "descripción limpia del problema en máx 200 chars",
+  "fechaServicio": "ISO 8601 datetime o null si no menciona fecha/hora",
+  "duracionHoras": número entero 1-8 estimado según la tarea, o 2 si no se puede determinar,
+  "ciudad": "ciudad mencionada o null"
+}`,
+      }, {
+        role: 'user',
+        content: texto.trim().substring(0, 500),
+      }],
+    });
+
+    const raw = completion.choices[0].message.content.trim()
+      .replace(/^```json\s*/i, '').replace(/```\s*$/i, '');
+    const parsed = JSON.parse(raw);
+    res.json({ parsed });
+  } catch (e) {
+    if (e instanceof SyntaxError) return res.status(422).json({ error: 'No pude entender la solicitud. Intenta ser más específico.' });
+    console.error('[bookings/parse]', e.message);
+    res.status(500).json({ error: 'Error al procesar la solicitud' });
   }
 });
 
