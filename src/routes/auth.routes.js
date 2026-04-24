@@ -3,6 +3,7 @@ const bcrypt      = require('bcryptjs');
 const jwt         = require('jsonwebtoken');
 const crypto      = require('crypto');
 const verifyToken = require('../middleware/verifyToken');
+const { updateProviderEmbedding } = require('../lib/embeddings');
 const prisma      = require('../lib/prisma');
 const email       = require('../lib/email');
 
@@ -39,9 +40,10 @@ router.post('/register', async (req, res) => {
       },
     });
 
-    // Si es proveedor, crear perfil vacío automáticamente
+    // Si es proveedor, crear perfil vacío + generar embedding inicial
     if (user.rol === 'PROVEEDOR') {
-      await prisma.providerProfile.create({ data: { userId: user.id } });
+      const profile = await prisma.providerProfile.create({ data: { userId: user.id } });
+      updateProviderEmbedding(profile.id).catch(() => {});
     }
 
     // Emails (fire-and-forget)

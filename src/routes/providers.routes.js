@@ -3,11 +3,12 @@ const verifyToken = require('../middleware/verifyToken');
 const prisma = require('../lib/prisma');
 const email = require('../lib/email');
 const { SERVICIOS_IDS } = require('./services.routes');
+const { updateProviderEmbedding, semanticSearch } = require('../lib/embeddings');
 
-// GET /providers — listar proveedores disponibles con filtros
+// GET /providers — listar proveedores con filtros + búsqueda semántica opcional (?q=)
 router.get('/', async (req, res) => {
   try {
-    const { ciudad, servicio, minCalificacion, minTarifa, maxTarifa, search, orden = 'calificacion_desc', page = 1, limit = 12 } = req.query;
+    const { ciudad, servicio, minCalificacion, minTarifa, maxTarifa, search, orden = 'calificacion_desc', page = 1, limit = 12, q } = req.query;
 
     const tarifaWhere = {};
     if (minTarifa) tarifaWhere.gte = parseFloat(minTarifa);
@@ -19,12 +20,27 @@ router.get('/', async (req, res) => {
       ...(servicio && { servicios: { has: servicio } }),
       ...(minCalificacion && { calificacion: { gte: parseFloat(minCalificacion) } }),
       ...(Object.keys(tarifaWhere).length > 0 && { tarifaPorHora: tarifaWhere }),
-      ...(search && {
-        user: {
-          nombre: { contains: search, mode: 'insensitive' },
-        },
-      }),
+      ...(search && { user: { nombre: { contains: search, mode: 'insensitive' } } }),
     };
+
+    // Búsqueda semántica con ?q=
+    if (q && q.trim().length > 2) {
+      const matches = await semanticSearch(q.trim(), 50);
+      if (matches.length > 0) {
+        const ids = matches.map(m => m.id);
+        where.id = { in: ids };
+        const providers = await prisma.providerProfile.findMany({
+          where,
+          include: { user: { select: { nombre: true, ciudad: true } } },
+        });
+        // Re-ordenar por similitud semántica
+        const simMap = Object.fromEntries(matches.map(m => [m.id, m.similarity]));
+        providers.sort((a, b) => (simMap[b.id] || 0) - (simMap[a.id] || 0));
+        const pageN = parseInt(page), limitN = parseInt(limit);
+        const paginated = providers.slice((pageN - 1) * limitN, pageN * limitN);
+        return res.json({ providers: paginated, total: providers.length, page: pageN, totalPages: Math.ceil(providers.length / limitN), semantic: true });
+      }
+    }
 
     const ordenMap = {
       calificacion_desc: { calificacion: 'desc' },
@@ -147,6 +163,9 @@ router.put('/me', verifyToken, async (req, res) => {
         ...(disponible !== undefined && { disponible }),
       },
     });
+
+    // Regenerar embedding en background (no bloquea respuesta)
+    updateProviderEmbedding(profile.id).catch(() => {});
 
     res.json({ mensaje: 'Perfil actualizado', profile });
   } catch (error) {
