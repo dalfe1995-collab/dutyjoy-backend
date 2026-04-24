@@ -6,11 +6,36 @@ const OpenAI = require('openai');
 
 const openai = process.env.OPENAI_API_KEY ? new OpenAI({ apiKey: process.env.OPENAI_API_KEY }) : null;
 
-// Convierte URL de Google Drive a URL directa de imagen
-function driveToDirectUrl(url) {
-  const match = url.match(/\/file\/d\/([a-zA-Z0-9_-]+)/);
-  if (match) return `https://drive.google.com/uc?export=view&id=${match[1]}`;
-  return url;
+// Extrae file ID de Google Drive y construye URLs candidatas
+function getDriveUrls(url) {
+  const match = url.match(/\/file\/d\/([a-zA-Z0-9_-]+)/) || url.match(/[?&]id=([a-zA-Z0-9_-]+)/);
+  if (!match) return [url];
+  const id = match[1];
+  return [
+    `https://lh3.googleusercontent.com/d/${id}`,
+    `https://drive.google.com/thumbnail?id=${id}&sz=w2000`,
+    `https://drive.google.com/uc?export=download&id=${id}&confirm=t`,
+  ];
+}
+
+// Descarga imagen y devuelve base64 + mimeType
+async function fetchImageAsBase64(url) {
+  const urls = getDriveUrls(url);
+  for (const candidate of urls) {
+    try {
+      const res = await fetch(candidate, {
+        headers: { 'User-Agent': 'Mozilla/5.0 (compatible; DutyJoy/1.0)' },
+        redirect: 'follow',
+        signal: AbortSignal.timeout(10000),
+      });
+      if (!res.ok) continue;
+      const contentType = res.headers.get('content-type') || '';
+      if (!contentType.startsWith('image/')) continue;
+      const buffer = Buffer.from(await res.arrayBuffer());
+      return { base64: buffer.toString('base64'), mimeType: contentType.split(';')[0] };
+    } catch { continue; }
+  }
+  return null;
 }
 
 // Middleware: solo ADMIN
@@ -210,7 +235,10 @@ router.post('/providers/:id/ai-verify', verifyToken, soloAdmin, async (req, res)
   if (!profile) return res.status(404).json({ error: 'Proveedor no encontrado' });
   if (!profile.cedulaUrl) return res.status(400).json({ error: 'El proveedor no ha subido documento' });
 
-  const imageUrl = driveToDirectUrl(profile.cedulaUrl);
+  const imgData = await fetchImageAsBase64(profile.cedulaUrl);
+  if (!imgData) {
+    return res.status(422).json({ error: 'No se pudo descargar el documento. Verifica que el archivo de Google Drive sea una imagen (JPG/PNG) compartida como "Cualquier persona con el enlace".' });
+  }
 
   try {
     const response = await openai.chat.completions.create({
@@ -221,7 +249,7 @@ router.post('/providers/:id/ai-verify', verifyToken, soloAdmin, async (req, res)
         content: [
           {
             type: 'text',
-            text: `Analiza este documento de identidad colombiano.
+            text: `Analiza este documento de identidad colombiano (Cédula de Ciudadanía).
 
 Nombre registrado en el perfil: "${profile.user.nombre}"
 
@@ -242,18 +270,22 @@ Responde SOLO con JSON válido (sin markdown):
   "razon": "explicación breve en español"
 }`,
           },
-          { type: 'image_url', image_url: { url: imageUrl, detail: 'high' } },
+          {
+            type: 'image_url',
+            image_url: { url: `data:${imgData.mimeType};base64,${imgData.base64}`, detail: 'high' },
+          },
         ],
       }],
     });
 
-    const raw = response.choices[0].message.content.trim();
+    const raw = response.choices[0].message.content.trim()
+      .replace(/^```json\s*/i, '').replace(/```\s*$/i, '');
     const analysis = JSON.parse(raw);
-    res.json({ analysis, imageUrl });
+    res.json({ analysis });
   } catch (e) {
-    if (e instanceof SyntaxError) return res.status(422).json({ error: 'No se pudo leer el documento. Verifica que la URL sea pública.' });
+    if (e instanceof SyntaxError) return res.status(422).json({ error: 'La IA no pudo interpretar el documento. ¿Es una foto clara de la cédula?' });
     console.error('[ai-verify]', e.message);
-    res.status(500).json({ error: 'Error al analizar el documento. Asegúrate de que la URL de Google Drive sea pública.' });
+    res.status(500).json({ error: 'Error interno al analizar el documento.' });
   }
 });
 
