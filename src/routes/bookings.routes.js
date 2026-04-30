@@ -69,13 +69,24 @@ router.post('/', verifyToken, async (req, res) => {
       },
     });
 
-    // ── Email al proveedor ────────────────────────────────────────────
+    // ── Emails: al proveedor + confirmación al cliente ────────────────
+    const fechaFmt = formatFecha(fechaServicio);
     email.reservaCreada({
-      proveedorEmail: booking.proveedor.user.email,
+      proveedorEmail:  booking.proveedor.user.email,
       proveedorNombre: booking.proveedor.user.nombre,
       clienteNombre:   booking.cliente.nombre,
       tipoServicio,
-      fecha:           formatFecha(fechaServicio),
+      fecha:           fechaFmt,
+      duracion:        horas,
+      precioTotal,
+      bookingId:       booking.id,
+    });
+    email.reservaCreadaCliente({
+      clienteEmail:    booking.cliente.email,
+      clienteNombre:   booking.cliente.nombre,
+      proveedorNombre: booking.proveedor.user.nombre,
+      tipoServicio,
+      fecha:           fechaFmt,
       duracion:        horas,
       precioTotal,
       bookingId:       booking.id,
@@ -292,6 +303,28 @@ router.patch('/:id/status', verifyToken, async (req, res) => {
         precioTotal:     booking.precioTotal,
         comision:        booking.comisionDutyJoy,
       });
+    }
+
+    if (estado === 'CANCELADO') {
+      if (esCliente) {
+        // Notificar al proveedor
+        email.reservaCancelada({
+          destinatarioEmail:  booking.proveedor.user.email,
+          destinatarioNombre: booking.proveedor.user.nombre,
+          canceladoPor:       booking.cliente.nombre + ' (cliente)',
+          tipoServicio:       booking.tipoServicio,
+          fecha,
+        });
+      } else {
+        // Proveedor o admin cancela — notificar al cliente
+        email.reservaCancelada({
+          destinatarioEmail:  booking.cliente.email,
+          destinatarioNombre: booking.cliente.nombre,
+          canceladoPor:       booking.proveedor.user.nombre + ' (proveedor)',
+          tipoServicio:       booking.tipoServicio,
+          fecha,
+        });
+      }
     }
 
     res.json({ mensaje: 'Estado actualizado', booking: updated });

@@ -76,6 +76,27 @@ async function reservaCreada({ proveedorEmail, proveedorNombre, clienteNombre, t
 }
 
 /**
+ * Al cliente cuando crea una reserva (confirmación inmediata)
+ */
+async function reservaCreadaCliente({ clienteEmail, clienteNombre, proveedorNombre, tipoServicio, fecha, duracion, precioTotal, bookingId }) {
+  const html = layout('¡Reserva enviada! 📋', `
+    <p>Hola <strong>${clienteNombre}</strong>,</p>
+    <p>Tu solicitud de servicio fue enviada a <strong>${proveedorNombre}</strong>. Pronto recibirás la confirmación.</p>
+    <table style="width:100%;border-collapse:collapse;margin:16px 0">
+      <tr><td style="padding:8px 0;color:#999">Servicio</td><td style="padding:8px 0;font-weight:600">${tipoServicio}</td></tr>
+      <tr><td style="padding:8px 0;color:#999">Proveedor</td><td style="padding:8px 0;font-weight:600">${proveedorNombre}</td></tr>
+      <tr><td style="padding:8px 0;color:#999">Fecha</td><td style="padding:8px 0;font-weight:600">${fecha}</td></tr>
+      <tr><td style="padding:8px 0;color:#999">Duración</td><td style="padding:8px 0;font-weight:600">${duracion} hora(s)</td></tr>
+      <tr><td style="padding:8px 0;color:#999">Total estimado</td><td style="padding:8px 0;font-weight:600;color:#FFC534">$${precioTotal.toLocaleString('es-CO')} COP</td></tr>
+    </table>
+    <p style="color:#aaa;font-size:13px">El proveedor tiene hasta 24 horas para confirmar. Te notificaremos cuando lo haga.</p>
+    <a href="${APP}/my-bookings" style="${BTN}">Ver mis reservas →</a>
+  `);
+
+  await send({ to: clienteEmail, subject: `Reserva enviada a ${proveedorNombre} — DutyJoy`, html });
+}
+
+/**
  * Al cliente cuando el proveedor confirma
  */
 async function reservaConfirmada({ clienteEmail, clienteNombre, proveedorNombre, tipoServicio, fecha, precioTotal }) {
@@ -92,6 +113,25 @@ async function reservaConfirmada({ clienteEmail, clienteNombre, proveedorNombre,
   `);
 
   await send({ to: clienteEmail, subject: `Tu reserva fue confirmada — DutyJoy`, html });
+}
+
+/**
+ * Notificación de cancelación — al proveedor o al cliente según quién cancela
+ */
+async function reservaCancelada({ destinatarioEmail, destinatarioNombre, canceladoPor, tipoServicio, fecha, motivo }) {
+  const html = layout('Reserva cancelada ❌', `
+    <p>Hola <strong>${destinatarioNombre}</strong>,</p>
+    <p>Tu reserva fue cancelada por <strong>${canceladoPor}</strong>.</p>
+    <table style="width:100%;border-collapse:collapse;margin:16px 0">
+      <tr><td style="padding:8px 0;color:#999">Servicio</td><td style="padding:8px 0;font-weight:600">${tipoServicio}</td></tr>
+      <tr><td style="padding:8px 0;color:#999">Fecha</td><td style="padding:8px 0;font-weight:600">${fecha}</td></tr>
+    </table>
+    ${motivo ? `<p style="color:#aaa;font-size:13px">Motivo: ${motivo}</p>` : ''}
+    <p>Si tienes preguntas, contáctanos en <a href="mailto:soporte@dutyjoy.com" style="color:#FFC534">soporte@dutyjoy.com</a>.</p>
+    <a href="${APP}/my-bookings" style="${BTN}">Ver mis reservas →</a>
+  `);
+
+  await send({ to: destinatarioEmail, subject: `Reserva cancelada — DutyJoy`, html });
 }
 
 /**
@@ -327,4 +367,6 @@ module.exports = {
   cedulaRechazada,
   disputaAdmin,
   disputaCliente,
+  reservaCreadaCliente,
+  reservaCancelada,
 };
