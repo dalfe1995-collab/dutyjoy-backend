@@ -97,7 +97,7 @@ router.get('/me', verifyToken, async (req, res) => {
       bookings = await prisma.booking.findMany({
         where: { clienteId: req.user.id },
         include: {
-          proveedor: { include: { user: { select: { nombre: true, ciudad: true } } } },
+          proveedor: { include: { user: { select: { nombre: true, ciudad: true, telefono: true } } } },
           review: true,
         },
         orderBy: { createdAt: 'desc' },
@@ -122,6 +122,70 @@ router.get('/me', verifyToken, async (req, res) => {
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: 'Error al obtener reservas' });
+  }
+});
+
+// GET /bookings/stats — estadísticas de reservas del usuario autenticado
+router.get('/stats', verifyToken, async (req, res) => {
+  try {
+    let whereBase;
+
+    if (req.user.rol === 'PROVEEDOR') {
+      const profile = await prisma.providerProfile.findUnique({ where: { userId: req.user.id } });
+      if (!profile) return res.status(404).json({ error: 'Perfil de proveedor no encontrado' });
+      whereBase = { proveedorId: profile.id };
+    } else if (req.user.rol === 'CLIENTE') {
+      whereBase = { clienteId: req.user.id };
+    } else {
+      return res.status(403).json({ error: 'Acceso denegado' });
+    }
+
+    const now             = new Date();
+    const startOfMonth    = new Date(now.getFullYear(), now.getMonth(), 1);
+    const startOfLastMonth = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+    const endOfLastMonth  = new Date(now.getFullYear(), now.getMonth(), 0, 23, 59, 59);
+
+    const [allCompleted, thisMonth, lastMonth, pendingCount] = await Promise.all([
+      prisma.booking.aggregate({
+        where: { ...whereBase, estado: 'COMPLETADO' },
+        _sum: { precioTotal: true, comisionDutyJoy: true },
+        _count: true,
+      }),
+      prisma.booking.aggregate({
+        where: { ...whereBase, estado: 'COMPLETADO', updatedAt: { gte: startOfMonth } },
+        _sum: { precioTotal: true },
+        _count: true,
+      }),
+      prisma.booking.aggregate({
+        where: { ...whereBase, estado: 'COMPLETADO', updatedAt: { gte: startOfLastMonth, lte: endOfLastMonth } },
+        _sum: { precioTotal: true },
+        _count: true,
+      }),
+      prisma.booking.count({
+        where: { ...whereBase, estado: { in: ['PENDIENTE', 'CONFIRMADO'] } },
+      }),
+    ]);
+
+    const totalBruto   = allCompleted._sum.precioTotal    || 0;
+    const totalComision = allCompleted._sum.comisionDutyJoy || 0;
+    const mesBruto     = thisMonth._sum.precioTotal       || 0;
+    const mesPasado    = lastMonth._sum.precioTotal        || 0;
+    const tendencia    = mesPasado > 0 ? Math.round((mesBruto - mesPasado) / mesPasado * 100) : null;
+
+    res.json({
+      totalCompletados:  allCompleted._count,
+      totalBruto,
+      totalComision,
+      totalNeto:         req.user.rol === 'PROVEEDOR' ? (totalBruto - totalComision) : totalBruto,
+      mesActualBruto:    mesBruto,
+      mesActualCount:    thisMonth._count,
+      mesPasadoBruto:    mesPasado,
+      tendencia,                      // % vs mes anterior, null si no hay datos
+      reservasPendientes: pendingCount,
+    });
+  } catch (error) {
+    console.error('[bookings/stats]', error);
+    res.status(500).json({ error: 'Error al obtener estadísticas' });
   }
 });
 
