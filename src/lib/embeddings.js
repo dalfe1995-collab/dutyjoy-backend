@@ -11,7 +11,8 @@ function buildProviderText(profile) {
   const tarifa    = profile.tarifaPorHora ? `Tarifa: ${profile.tarifaPorHora} COP por hora.` : '';
   const calif     = profile.calificacion > 0 ? `Calificación: ${profile.calificacion.toFixed(1)}.` : '';
   const verif     = profile.verificado ? 'Proveedor verificado.' : '';
-  return `Proveedor de servicios: ${servicios}. Ciudad: ${ciudades}. ${bio} ${tarifa} ${calif} ${verif}`.trim();
+  const exp       = profile.aniosExperiencia ? `${profile.aniosExperiencia} años de experiencia.` : '';
+  return `Proveedor de servicios: ${servicios}. Ciudad: ${ciudades}. ${bio} ${tarifa} ${calif} ${verif} ${exp}`.trim();
 }
 
 // Genera embedding de un texto usando OpenAI

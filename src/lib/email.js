@@ -181,7 +181,7 @@ async function bienvenida({ email, nombre, rol }) {
       : `<p>Ya puedes buscar proveedores y hacer tu primera reserva:</p>
          <a href="${APP}/providers" style="${BTN}">Explorar servicios →</a>`
     }
-    <p style="color:#666;font-size:13px;margin-top:24px">Si tienes preguntas escríbenos a <a href="mailto:info@dutyjoy.com" style="color:#FFC534">info@dutyjoy.com</a></p>
+    <p style="color:#666;font-size:13px;margin-top:24px">Si tienes preguntas escríbenos a <a href="mailto:soporte@dutyjoy.com" style="color:#FFC534">soporte@dutyjoy.com</a></p>
   `);
 
   await send({ to: email, subject: `¡Bienvenido a DutyJoy, ${nombre}!`, html });
@@ -305,7 +305,7 @@ async function disputaCliente({ clienteEmail, clienteNombre, bookingId }) {
     <p>Nuestro equipo lo revisará y te contactará en un plazo máximo de <strong>24 horas hábiles</strong>.</p>
     <p style="color:#666;font-size:13px;margin-top:24px">
       Si tienes más detalles que compartir, responde a este email o escríbenos a
-      <a href="mailto:info@dutyjoy.com" style="color:#FFC534">info@dutyjoy.com</a>
+      <a href="mailto:soporte@dutyjoy.com" style="color:#FFC534">soporte@dutyjoy.com</a>
     </p>
   `);
 
