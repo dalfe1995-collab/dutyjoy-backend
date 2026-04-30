@@ -30,6 +30,7 @@ model User {
   providerProfile       ProviderProfile?
   bookingsComoCliente   Booking[] @relation("ClienteBookings")
   reviewsEscritas       Review[]  @relation("ClienteReviews")
+  favoritos             Favorito[] @relation("ClienteFavoritos")
 }
 
 enum Rol {
@@ -56,8 +57,9 @@ model ProviderProfile {
   cedulaNota    String?  // razón de rechazo (opcional)
   createdAt     DateTime @default(now())
 
-  bookings Booking[]
-  reviews  Review[]
+  bookings   Booking[]
+  reviews    Review[]
+  favoritos  Favorito[]
 }
 
 model Booking {
@@ -98,4 +100,15 @@ model Review {
   calificacion Int             // 1 a 5
   comentario   String?
   createdAt    DateTime        @default(now())
+}
+
+model Favorito {
+  id          String          @id @default(cuid())
+  clienteId   String
+  cliente     User            @relation("ClienteFavoritos", fields: [clienteId], references: [id])
+  proveedorId String
+  proveedor   ProviderProfile @relation(fields: [proveedorId], references: [id])
+  createdAt   DateTime        @default(now())
+
+  @@unique([clienteId, proveedorId])
 }

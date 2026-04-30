@@ -51,6 +51,7 @@ app.use('/providers', apiLimiter);
 app.use('/reviews',   apiLimiter);
 app.use('/payments',  apiLimiter);
 app.use('/admin',     apiLimiter);
+app.use('/favorites', apiLimiter);
 
 // Chat: límite más estricto para controlar costos de OpenAI (30 req/min por IP)
 const chatLimiter = rateLimit({
@@ -77,6 +78,7 @@ app.use('/reviews',   require('./routes/reviews.routes'));
 app.use('/payments',  require('./routes/payments.routes'));
 app.use('/admin',     require('./routes/admin.routes'));
 app.use('/chat',      require('./routes/chat.routes'));
+app.use('/favorites', require('./routes/favorites.routes'));
 
 // ── Public stats (landing page) ───────────────────────────────────────────
 const prisma = require('./lib/prisma');
