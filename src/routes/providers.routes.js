@@ -135,7 +135,7 @@ router.put('/me', verifyToken, async (req, res) => {
       return res.status(403).json({ error: 'Solo los proveedores pueden actualizar este perfil' });
     }
 
-    const { bio, servicios, tarifaPorHora, ciudades, disponible } = req.body;
+    const { bio, servicios, tarifaPorHora, ciudades, disponible, aniosExperiencia } = req.body;
 
     // Validar servicios contra catálogo
     if (servicios !== undefined) {
@@ -164,6 +164,7 @@ router.put('/me', verifyToken, async (req, res) => {
         ...(tarifaPorHora !== undefined && { tarifaPorHora: parseFloat(tarifaPorHora) }),
         ...(ciudades !== undefined && { ciudades }),
         ...(disponible !== undefined && { disponible }),
+        ...(aniosExperiencia !== undefined && { aniosExperiencia: aniosExperiencia ? parseInt(aniosExperiencia) : null }),
       },
     });
 

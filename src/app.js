@@ -78,6 +78,28 @@ app.use('/payments',  require('./routes/payments.routes'));
 app.use('/admin',     require('./routes/admin.routes'));
 app.use('/chat',      require('./routes/chat.routes'));
 
+// ── Public stats (landing page) ───────────────────────────────────────────
+const prisma = require('./lib/prisma');
+app.get('/stats/public', async (req, res) => {
+  try {
+    const [totalProveedores, verificados, totalBookings, avgCalif] = await Promise.all([
+      prisma.providerProfile.count({ where: { disponible: true } }),
+      prisma.providerProfile.count({ where: { verificado: true } }),
+      prisma.booking.count(),
+      prisma.providerProfile.aggregate({ _avg: { calificacion: true }, where: { calificacion: { gt: 0 } } }),
+    ]);
+    res.set('Cache-Control', 'public, max-age=300'); // 5 min cache
+    res.json({
+      proveedores: totalProveedores,
+      verificados,
+      serviciosCompletados: totalBookings,
+      calificacionPromedio: avgCalif._avg.calificacion
+        ? parseFloat(avgCalif._avg.calificacion.toFixed(1))
+        : 4.9,
+    });
+  } catch { res.json({ proveedores: 0, verificados: 0, serviciosCompletados: 0, calificacionPromedio: 4.9 }); }
+});
+
 // ── Health check ──────────────────────────────────────────────────────────
 app.get('/health', (req, res) => {
   res.json({
