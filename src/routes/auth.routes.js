@@ -9,6 +9,22 @@ const email       = require('../lib/email');
 
 const BCRYPT_ROUNDS = parseInt(process.env.BCRYPT_ROUNDS || '12', 10);
 
+// ── Helpers ───────────────────────────────────────────────────────────────
+const ACCESS_TOKEN_TTL  = '1h';   // short-lived
+const REFRESH_TOKEN_TTL = 30 * 24 * 60 * 60 * 1000; // 30 days in ms
+
+// Regex PRD: min 8, 1 uppercase, 1 number, 1 symbol
+const PASSWORD_REGEX = /^(?=.*[A-Z])(?=.*\d)(?=.*[^A-Za-z0-9]).{8,}$/;
+const PASSWORD_ERROR = 'La contraseña debe tener mínimo 8 caracteres, una mayúscula, un número y un símbolo';
+
+function issueTokens(user) {
+  const payload = { id: user.id, email: user.email, rol: user.rol };
+  const accessToken  = jwt.sign(payload, process.env.JWT_SECRET, { expiresIn: ACCESS_TOKEN_TTL });
+  const refreshToken = crypto.randomBytes(40).toString('hex');
+  const refreshTokenExp = new Date(Date.now() + REFRESH_TOKEN_TTL);
+  return { accessToken, refreshToken, refreshTokenExp };
+}
+
 // POST /auth/register
 router.post('/register', async (req, res) => {
   try {
@@ -18,27 +34,38 @@ router.post('/register', async (req, res) => {
       return res.status(400).json({ error: 'Nombre, email y contraseña son requeridos' });
     }
 
+    // Validación de contraseña (PRD)
+    if (!PASSWORD_REGEX.test(password)) {
+      return res.status(400).json({ error: PASSWORD_ERROR });
+    }
+
     const existingUser = await prisma.user.findUnique({ where: { email: emailAddr } });
     if (existingUser) {
       return res.status(400).json({ error: 'Este email ya está registrado' });
     }
 
     const hashedPassword = await bcrypt.hash(password, BCRYPT_ROUNDS);
-
-    // Token de verificación de email (24h)
     const emailVerifToken = crypto.randomBytes(32).toString('hex');
+
+    const { accessToken, refreshToken, refreshTokenExp } = issueTokens({ id: 'tmp', email: emailAddr, rol: rol === 'PROVEEDOR' ? 'PROVEEDOR' : 'CLIENTE' });
 
     const user = await prisma.user.create({
       data: {
         nombre,
-        email:          emailAddr,
-        password:       hashedPassword,
+        email:           emailAddr,
+        password:        hashedPassword,
         telefono,
-        ciudad:         ciudad || 'Ibagué',
-        rol:            rol === 'PROVEEDOR' ? 'PROVEEDOR' : 'CLIENTE',
+        ciudad:          ciudad || 'Ibagué',
+        rol:             rol === 'PROVEEDOR' ? 'PROVEEDOR' : 'CLIENTE',
         emailVerifToken,
+        refreshToken,
+        refreshTokenExp,
       },
     });
+
+    // Re-sign with real user id
+    const { accessToken: finalAccess, refreshToken: finalRefresh, refreshTokenExp: finalExp } = issueTokens(user);
+    await prisma.user.update({ where: { id: user.id }, data: { refreshToken: finalRefresh, refreshTokenExp: finalExp } });
 
     // Si es proveedor, crear perfil vacío + generar embedding inicial
     if (user.rol === 'PROVEEDOR') {
@@ -50,16 +77,11 @@ router.post('/register', async (req, res) => {
     email.bienvenida({ email: user.email, nombre: user.nombre, rol: user.rol });
     email.verificarEmail({ email: user.email, nombre: user.nombre, token: emailVerifToken });
 
-    const token = jwt.sign(
-      { id: user.id, email: user.email, rol: user.rol },
-      process.env.JWT_SECRET,
-      { expiresIn: '7d' },
-    );
-
     res.status(201).json({
-      mensaje:  'Usuario registrado exitosamente',
-      token,
-      usuario:  { id: user.id, nombre: user.nombre, email: user.email, rol: user.rol },
+      mensaje:      'Usuario registrado exitosamente',
+      token:        finalAccess,
+      refreshToken: finalRefresh,
+      usuario:      { id: user.id, nombre: user.nombre, email: user.email, rol: user.rol },
     });
   } catch (error) {
     console.error(error);
@@ -82,14 +104,15 @@ router.post('/login', async (req, res) => {
       return res.status(401).json({ error: 'Email o contraseña incorrectos' });
     }
 
-    const token = jwt.sign(
-      { id: user.id, email: user.email, rol: user.rol },
-      process.env.JWT_SECRET,
-      { expiresIn: '7d' },
-    );
+    const { accessToken, refreshToken, refreshTokenExp } = issueTokens(user);
+    await prisma.user.update({
+      where: { id: user.id },
+      data:  { refreshToken, refreshTokenExp },
+    });
 
     res.json({
-      token,
+      token:        accessToken,
+      refreshToken,
       usuario: { id: user.id, nombre: user.nombre, email: user.email, rol: user.rol },
     });
   } catch (error) {
@@ -204,8 +227,8 @@ router.put('/me/password', verifyToken, async (req, res) => {
     if (!passwordActual || !passwordNuevo) {
       return res.status(400).json({ error: 'passwordActual y passwordNuevo son requeridos' });
     }
-    if (passwordNuevo.length < 6) {
-      return res.status(400).json({ error: 'La nueva contraseña debe tener al menos 6 caracteres' });
+    if (!PASSWORD_REGEX.test(passwordNuevo)) {
+      return res.status(400).json({ error: PASSWORD_ERROR });
     }
 
     const user = await prisma.user.findUnique({ where: { id: req.user.id } });
@@ -269,8 +292,8 @@ router.post('/reset-password', async (req, res) => {
     if (!token || !passwordNuevo) {
       return res.status(400).json({ error: 'token y passwordNuevo son requeridos' });
     }
-    if (passwordNuevo.length < 6) {
-      return res.status(400).json({ error: 'La contraseña debe tener al menos 6 caracteres' });
+    if (!PASSWORD_REGEX.test(passwordNuevo)) {
+      return res.status(400).json({ error: PASSWORD_ERROR });
     }
 
     const user = await prisma.user.findFirst({
@@ -298,6 +321,49 @@ router.post('/reset-password', async (req, res) => {
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: 'Error al restablecer la contraseña' });
+  }
+});
+
+// POST /auth/refresh — renueva el access token usando el refresh token
+router.post('/refresh', async (req, res) => {
+  try {
+    const { refreshToken } = req.body;
+    if (!refreshToken) return res.status(400).json({ error: 'refreshToken requerido' });
+
+    const user = await prisma.user.findFirst({
+      where: {
+        refreshToken,
+        refreshTokenExp: { gt: new Date() },
+        activo: true,
+      },
+    });
+
+    if (!user) return res.status(401).json({ error: 'Refresh token inválido o expirado. Inicia sesión nuevamente.' });
+
+    // Emite nuevo par de tokens (rotation — invalida el anterior)
+    const { accessToken, refreshToken: newRefresh, refreshTokenExp } = issueTokens(user);
+    await prisma.user.update({
+      where: { id: user.id },
+      data:  { refreshToken: newRefresh, refreshTokenExp },
+    });
+
+    res.json({ token: accessToken, refreshToken: newRefresh });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'Error al renovar sesión' });
+  }
+});
+
+// POST /auth/logout — invalida el refresh token del usuario
+router.post('/logout', verifyToken, async (req, res) => {
+  try {
+    await prisma.user.update({
+      where: { id: req.user.id },
+      data:  { refreshToken: null, refreshTokenExp: null },
+    });
+    res.json({ mensaje: 'Sesión cerrada correctamente' });
+  } catch (error) {
+    res.status(500).json({ error: 'Error al cerrar sesión' });
   }
 });
 

@@ -21,6 +21,8 @@ model User {
   emailVerifToken   String?
   resetToken        String?
   resetTokenExpiry  DateTime?
+  refreshToken      String?
+  refreshTokenExp   DateTime?
   createdAt         DateTime  @default(now())
   updatedAt         DateTime  @updatedAt
 
