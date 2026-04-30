@@ -293,4 +293,128 @@ router.post('/:id/review-summary', async (req, res) => {
   }
 });
 
+// GET /providers/me/profile-score — analiza el perfil y da score + tips con IA
+router.get('/me/profile-score', verifyToken, async (req, res) => {
+  if (req.user.rol !== 'PROVEEDOR') return res.status(403).json({ error: 'Solo proveedores' });
+
+  const profile = await prisma.providerProfile.findUnique({
+    where: { userId: req.user.id },
+    include: {
+      user: { select: { nombre: true, emailVerificado: true, telefono: true, ciudad: true } },
+      _count: { select: { reviews: true, bookings: true } },
+    },
+  });
+  if (!profile) return res.status(404).json({ error: 'Perfil no encontrado' });
+
+  // Calcular score sin IA (base objetiva)
+  const checks = {
+    bio:          { ok: (profile.bio?.trim().length || 0) >= 50,   peso: 20, label: 'Biografía completa (min 50 caracteres)' },
+    bio_larga:    { ok: (profile.bio?.trim().length || 0) >= 150,  peso: 10, label: 'Biografía detallada (min 150 caracteres)' },
+    servicios:    { ok: (profile.servicios?.length || 0) >= 1,     peso: 15, label: 'Al menos 1 servicio configurado' },
+    multi_serv:   { ok: (profile.servicios?.length || 0) >= 2,     peso: 5,  label: 'Múltiples servicios (2+)' },
+    ciudades:     { ok: (profile.ciudades?.length  || 0) >= 1,     peso: 10, label: 'Ciudad(es) de trabajo configuradas' },
+    tarifa:       { ok: (profile.tarifaPorHora || 0) > 0,          peso: 10, label: 'Tarifa por hora configurada' },
+    cedula:       { ok: profile.cedulaStatus === 'aprobado',       peso: 15, label: 'Cédula verificada' },
+    email:        { ok: profile.user.emailVerificado === true,      peso: 5,  label: 'Email verificado' },
+    telefono:     { ok: !!profile.user.telefono,                   peso: 5,  label: 'Teléfono registrado' },
+    experiencia:  { ok: (profile.aniosExperiencia || 0) > 0,       peso: 5,  label: 'Años de experiencia registrados' },
+  };
+
+  const score = Object.values(checks).reduce((sum, c) => sum + (c.ok ? c.peso : 0), 0);
+  const pendientes = Object.values(checks).filter(c => !c.ok).map(c => c.label);
+
+  // Si hay OpenAI, enriquecer con 3 tips personalizados
+  let tips = pendientes.slice(0, 3).map(p => `Completa: ${p}`);
+
+  if (openai && pendientes.length > 0) {
+    try {
+      const ctx = [
+        `Score actual: ${score}/100`,
+        `Servicios: ${(profile.servicios || []).join(', ') || 'ninguno'}`,
+        `Ciudades: ${(profile.ciudades || []).join(', ') || 'ninguna'}`,
+        `Bio: ${profile.bio ? `"${profile.bio.substring(0, 100)}..."` : 'vacía'}`,
+        `Tarifa: ${profile.tarifaPorHora ? `$${profile.tarifaPorHora.toLocaleString('es-CO')}/hora` : 'no configurada'}`,
+        `Cédula: ${profile.cedulaStatus}`,
+        `Pendiente mejorar: ${pendientes.slice(0, 5).join('; ')}`,
+      ].join('\n');
+
+      const completion = await openai.chat.completions.create({
+        model: 'gpt-4o-mini',
+        max_tokens: 200,
+        temperature: 0.6,
+        messages: [{
+          role: 'system',
+          content: 'Eres un coach de perfiles para trabajadores independientes colombianos en DutyJoy. Da exactamente 3 tips concretos y accionables (en español, tono amigable) para que este proveedor consiga más clientes. Responde SOLO con JSON válido: {"tips": ["tip1","tip2","tip3"]}',
+        }, {
+          role: 'user',
+          content: ctx,
+        }],
+      });
+
+      const raw = completion.choices[0].message.content.trim()
+        .replace(/^```json\s*/i, '').replace(/```\s*$/i, '');
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed.tips) && parsed.tips.length === 3) tips = parsed.tips;
+    } catch (e) {
+      console.error('[profile-score]', e.message);
+      // tips already set as fallback
+    }
+  }
+
+  res.json({ score, tips, checks: Object.fromEntries(Object.entries(checks).map(([k, v]) => [k, v.ok])) });
+});
+
+// GET /providers/market-pricing — rango de precios del mercado por servicio/ciudad
+router.get('/market-pricing', async (req, res) => {
+  const { servicio, ciudad } = req.query;
+  if (!servicio) return res.status(400).json({ error: 'servicio es requerido' });
+
+  try {
+    const where = {
+      disponible: true,
+      tarifaPorHora: { gt: 0 },
+      ...(servicio && { servicios: { has: servicio } }),
+      ...(ciudad && { ciudades: { has: ciudad } }),
+    };
+
+    const stats = await prisma.providerProfile.aggregate({
+      where,
+      _avg: { tarifaPorHora: true },
+      _min: { tarifaPorHora: true },
+      _max: { tarifaPorHora: true },
+      _count: { tarifaPorHora: true },
+    });
+
+    const avg = Math.round(stats._avg.tarifaPorHora || 0);
+    const min = stats._min.tarifaPorHora || 0;
+    const max = stats._max.tarifaPorHora || 0;
+    const total = stats._count.tarifaPorHora;
+
+    // Si no hay datos suficientes, devolver rangos de referencia por servicio
+    const fallbacks = {
+      plomeria: { min: 35000, avg: 55000, max: 90000 },
+      electricidad: { min: 40000, avg: 65000, max: 120000 },
+      limpieza: { min: 20000, avg: 35000, max: 60000 },
+      jardineria: { min: 25000, avg: 40000, max: 70000 },
+      pintura: { min: 30000, avg: 50000, max: 90000 },
+      cerrajeria: { min: 35000, avg: 55000, max: 100000 },
+      mudanzas: { min: 50000, avg: 80000, max: 150000 },
+      aire_acondicionado: { min: 60000, avg: 90000, max: 150000 },
+      carpinteria: { min: 35000, avg: 55000, max: 100000 },
+      fumigacion: { min: 40000, avg: 65000, max: 120000 },
+    };
+
+    if (total < 3) {
+      const fb = fallbacks[servicio] || { min: 30000, avg: 50000, max: 100000 };
+      return res.json({ ...fb, total: 0, fuente: 'referencia' });
+    }
+
+    const sugerido = Math.round(avg * 1.0 / 1000) * 1000; // redondear a miles
+    res.json({ min, avg, max, sugerido, total, fuente: 'mercado' });
+  } catch (e) {
+    console.error('[market-pricing]', e.message);
+    res.status(500).json({ error: 'Error al obtener precios del mercado' });
+  }
+});
+
 module.exports = router;
