@@ -23,13 +23,28 @@ Información clave:
 
 Responde siempre en español, de forma amable, concisa y útil. Si no sabes algo, indica que pueden escribir a soporte@dutyjoy.com. No inventes información.`;
 
+// Mapea URL del frontend a contexto legible
+function urlContext(url) {
+  if (!url || typeof url !== 'string') return null;
+  const clean = url.split('?')[0];
+  if (clean === '/')                  return 'El usuario está en la página de inicio (Landing).';
+  if (clean === '/providers')         return 'El usuario está en la lista de proveedores, buscando servicios.';
+  if (clean.startsWith('/providers/')) return 'El usuario está viendo el perfil de un proveedor específico.';
+  if (clean === '/dashboard')         return 'El usuario está en su panel de control (Dashboard).';
+  if (clean === '/my-bookings')       return 'El usuario está revisando sus reservas.';
+  if (clean === '/register')          return 'El usuario está en el formulario de registro.';
+  if (clean === '/login')             return 'El usuario está en la página de inicio de sesión.';
+  if (clean === '/admin')             return 'El usuario está en el panel de administración.';
+  return null;
+}
+
 // POST /chat — chatbot de soporte conversacional
 router.post('/', async (req, res) => {
   if (!openai) {
     return res.status(503).json({ error: 'Asistente no disponible en este momento.' });
   }
 
-  const { messages } = req.body;
+  const { messages, context } = req.body;
 
   if (!Array.isArray(messages) || messages.length === 0) {
     return res.status(400).json({ error: 'Se requiere un array de mensajes.' });
@@ -49,13 +64,19 @@ router.post('/', async (req, res) => {
     return res.status(400).json({ error: 'El último mensaje debe ser del usuario.' });
   }
 
+  // Enrich system prompt with page context if available
+  const pageHint = urlContext(context?.url);
+  const systemContent = pageHint
+    ? `${SYSTEM_PROMPT}\n\nContexto actual: ${pageHint}`
+    : SYSTEM_PROMPT;
+
   try {
     const completion = await openai.chat.completions.create({
       model: 'gpt-4o-mini',
       max_tokens: 300,
       temperature: 0.7,
       messages: [
-        { role: 'system', content: SYSTEM_PROMPT },
+        { role: 'system', content: systemContent },
         ...sanitized,
       ],
     });

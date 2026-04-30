@@ -100,6 +100,52 @@ app.get('/stats/public', async (req, res) => {
   } catch { res.json({ proveedores: 0, verificados: 0, serviciosCompletados: 0, calificacionPromedio: 4.9 }); }
 });
 
+// ── Sitemap.xml (SEO) ────────────────────────────────────────────────────
+const FRONTEND_URL = process.env.FRONTEND_URL || 'https://app.dutyjoy.com';
+app.get('/sitemap.xml', async (req, res) => {
+  try {
+    const providers = await prisma.providerProfile.findMany({
+      where: { disponible: true },
+      select: { id: true, updatedAt: true },
+    });
+
+    const staticPages = [
+      { path: '/', priority: '1.0', freq: 'daily' },
+      { path: '/providers', priority: '0.9', freq: 'hourly' },
+      { path: '/terms', priority: '0.3', freq: 'monthly' },
+      { path: '/privacy', priority: '0.3', freq: 'monthly' },
+    ];
+
+    let xml = `<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">`;
+
+    for (const p of staticPages) {
+      xml += `\n  <url>
+    <loc>${FRONTEND_URL}${p.path}</loc>
+    <changefreq>${p.freq}</changefreq>
+    <priority>${p.priority}</priority>
+  </url>`;
+    }
+
+    for (const p of providers) {
+      const lastmod = p.updatedAt.toISOString().split('T')[0];
+      xml += `\n  <url>
+    <loc>${FRONTEND_URL}/providers/${p.id}</loc>
+    <lastmod>${lastmod}</lastmod>
+    <changefreq>weekly</changefreq>
+    <priority>0.7</priority>
+  </url>`;
+    }
+
+    xml += '\n</urlset>';
+
+    res.set('Content-Type', 'application/xml; charset=utf-8');
+    res.set('Cache-Control', 'public, max-age=43200'); // 12h cache
+    res.send(xml);
+  } catch {
+    res.status(500).send('<?xml version="1.0"?><error>Error generating sitemap</error>');
+  }
+});
+
 // ── Health check ──────────────────────────────────────────────────────────
 app.get('/health', (req, res) => {
   res.json({
