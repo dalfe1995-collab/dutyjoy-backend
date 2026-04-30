@@ -59,15 +59,69 @@ async function enviarRecordatorios() {
 }
 
 /**
+ * Cron: auto-cancelar reservas PENDIENTE con más de 24h sin respuesta del proveedor
+ * Se ejecuta cada hora. Notifica al cliente.
+ */
+async function cancelarReservasExpiradas() {
+  const limite = new Date(Date.now() - 24 * 60 * 60 * 1000);
+
+  try {
+    const expiradas = await prisma.booking.findMany({
+      where: {
+        estado:    'PENDIENTE',
+        createdAt: { lt: limite },
+      },
+      include: {
+        cliente:   { select: { nombre: true, email: true } },
+        proveedor: { include: { user: { select: { nombre: true } } } },
+      },
+    });
+
+    for (const reserva of expiradas) {
+      await prisma.booking.update({
+        where: { id: reserva.id },
+        data:  { estado: 'CANCELADO' },
+      });
+
+      const fecha = new Date(reserva.fechaServicio).toLocaleDateString('es-CO', {
+        weekday: 'long', year: 'numeric', month: 'long', day: 'numeric',
+      });
+
+      email.reservaCancelada({
+        destinatarioEmail:  reserva.cliente.email,
+        destinatarioNombre: reserva.cliente.nombre,
+        canceladoPor:       'DutyJoy (sin respuesta del proveedor en 24h)',
+        tipoServicio:       reserva.tipoServicio,
+        fecha,
+        motivo:             'El proveedor no respondió en 24 horas. Tu dinero no fue cobrado. Puedes buscar otro proveedor.',
+      }).catch(() => {});
+
+      console.log(`[CRON] Reserva expirada auto-cancelada → ${reserva.id}`);
+    }
+
+    if (expiradas.length > 0) {
+      console.log(`[CRON] ${expiradas.length} reserva(s) expirada(s) canceladas`);
+    }
+  } catch (err) {
+    console.error('[CRON] Error en cancelarReservasExpiradas:', err.message);
+  }
+}
+
+/**
  * Registra todos los crons. Llamar desde index.js una sola vez.
  */
 function iniciarCrons() {
-  // Cada hora en punto
+  // Recordatorio 24h antes — cada hora en punto
   cron.schedule('0 * * * *', enviarRecordatorios, {
     timezone: 'America/Bogota',
   });
 
-  console.log('⏰  Crons activos: recordatorio24h (cada hora)');
+  // Auto-cancelar reservas expiradas — cada hora a los 30 min
+  cron.schedule('30 * * * *', cancelarReservasExpiradas, {
+    timezone: 'America/Bogota',
+  });
+
+  console.log('⏰  Crons activos: recordatorio24h (cada hora) · expiracionReservas (cada hora :30)');
 }
 
 module.exports = { iniciarCrons };
