@@ -2,8 +2,11 @@ const router = require('express').Router();
 const verifyToken = require('../middleware/verifyToken');
 const prisma = require('../lib/prisma');
 const email = require('../lib/email');
+const OpenAI = require('openai');
 const { SERVICIOS_IDS } = require('./services.routes');
 const { updateProviderEmbedding, semanticSearch } = require('../lib/embeddings');
+
+const openai = process.env.OPENAI_API_KEY ? new OpenAI({ apiKey: process.env.OPENAI_API_KEY }) : null;
 
 // GET /providers — listar proveedores con filtros + búsqueda semántica opcional (?q=)
 router.get('/', async (req, res) => {
@@ -195,6 +198,98 @@ router.get('/:id', async (req, res) => {
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: 'Error al obtener proveedor' });
+  }
+});
+
+// POST /providers/me/generate-bio — genera bio profesional con IA
+router.post('/me/generate-bio', verifyToken, async (req, res) => {
+  if (!openai) return res.status(503).json({ error: 'IA no disponible en este momento.' });
+  if (req.user.rol !== 'PROVEEDOR') return res.status(403).json({ error: 'Solo proveedores' });
+
+  const profile = await prisma.providerProfile.findUnique({
+    where: { userId: req.user.id },
+    include: { user: { select: { nombre: true, ciudad: true } } },
+  });
+  if (!profile) return res.status(404).json({ error: 'Perfil no encontrado' });
+
+  const servicios = (profile.servicios || []).join(', ') || 'servicios del hogar';
+  const ciudades  = (profile.ciudades  || []).join(', ') || profile.user.ciudad || 'Colombia';
+  const tarifa    = profile.tarifaPorHora ? `$${profile.tarifaPorHora.toLocaleString('es-CO')} COP/hora` : null;
+  const anios     = profile.aniosExperiencia ? `${profile.aniosExperiencia} años de experiencia` : null;
+  const calif     = profile.calificacion > 0 ? `calificación de ${profile.calificacion.toFixed(1)}/5` : null;
+  const verif     = profile.verificado ? 'proveedor verificado' : null;
+
+  const contexto = [anios, calif, verif].filter(Boolean).join(', ');
+
+  try {
+    const completion = await openai.chat.completions.create({
+      model: 'gpt-4o-mini',
+      max_tokens: 200,
+      temperature: 0.8,
+      messages: [{
+        role: 'system',
+        content: 'Eres un redactor profesional para perfiles de trabajadores independientes colombianos. Escribe bios en primera persona, cálidas, confiables y concisas (máx 150 palabras). Usa lenguaje natural colombiano. NO uses emojis. NO inventes datos que no se te proporcionen.',
+      }, {
+        role: 'user',
+        content: `Nombre: ${profile.user.nombre}
+Servicios: ${servicios}
+Ciudad(es): ${ciudades}
+${tarifa ? `Tarifa: ${tarifa}` : ''}
+${contexto ? `Info adicional: ${contexto}` : ''}
+${profile.bio ? `Bio actual (opcional, puedes mejorarla): "${profile.bio}"` : ''}
+
+Escribe una bio profesional en primera persona para este proveedor.`,
+      }],
+    });
+
+    const bio = completion.choices[0].message.content.trim();
+    res.json({ bio });
+  } catch (e) {
+    const detail = e?.response?.error?.message || e?.message || '';
+    console.error('[generate-bio]', detail);
+    res.status(503).json({ error: 'No se pudo generar la bio. Intenta de nuevo.' });
+  }
+});
+
+// POST /providers/:id/review-summary — resumen de reseñas con IA (público)
+router.post('/:id/review-summary', async (req, res) => {
+  if (!openai) return res.status(503).json({ error: 'IA no disponible en este momento.' });
+
+  const profile = await prisma.providerProfile.findUnique({
+    where: { id: req.params.id },
+    include: {
+      reviews: { select: { calificacion: true, comentario: true }, orderBy: { createdAt: 'desc' }, take: 30 },
+    },
+  });
+  if (!profile) return res.status(404).json({ error: 'Proveedor no encontrado' });
+
+  const reseñas = profile.reviews.filter(r => r.comentario?.trim());
+  if (reseñas.length < 2) {
+    return res.json({ summary: null, razon: 'No hay suficientes reseñas para generar un resumen.' });
+  }
+
+  const texto = reseñas.map((r, i) => `${i + 1}. [${r.calificacion}★] "${r.comentario}"`).join('\n');
+
+  try {
+    const completion = await openai.chat.completions.create({
+      model: 'gpt-4o-mini',
+      max_tokens: 150,
+      temperature: 0.5,
+      messages: [{
+        role: 'system',
+        content: 'Eres un analista de reseñas. Resume en 2-3 oraciones en español lo que los clientes destacan (positivo y negativo si aplica) de este proveedor. Sé objetivo, conciso y neutral. No menciones nombres propios. Empieza con "Los clientes destacan..."',
+      }, {
+        role: 'user',
+        content: `Reseñas del proveedor:\n${texto}`,
+      }],
+    });
+
+    const summary = completion.choices[0].message.content.trim();
+    res.json({ summary, total: reseñas.length });
+  } catch (e) {
+    const detail = e?.response?.error?.message || e?.message || '';
+    console.error('[review-summary]', detail);
+    res.status(503).json({ error: 'No se pudo generar el resumen.' });
   }
 });
 
