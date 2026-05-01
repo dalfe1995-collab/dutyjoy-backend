@@ -97,6 +97,42 @@ router.get('/stats', verifyToken, soloAdmin, async (req, res) => {
   }
 });
 
+// GET /admin/stats/monthly — ingresos y reservas de los últimos 6 meses
+router.get('/stats/monthly', verifyToken, soloAdmin, async (req, res) => {
+  try {
+    const now = new Date();
+    const months = Array.from({ length: 6 }, (_, i) => {
+      const d = new Date(now.getFullYear(), now.getMonth() - (5 - i), 1);
+      const start = new Date(d.getFullYear(), d.getMonth(), 1);
+      const end   = new Date(d.getFullYear(), d.getMonth() + 1, 0, 23, 59, 59, 999);
+      return { year: d.getFullYear(), month: d.getMonth(), start, end, label: d.toLocaleString('es-CO', { month: 'short' }) };
+    });
+
+    const results = await Promise.all(
+      months.map(async m => {
+        const where = { estado: 'COMPLETADO', updatedAt: { gte: m.start, lte: m.end } };
+        const [agg, count] = await Promise.all([
+          prisma.booking.aggregate({ _sum: { precioTotal: true, comisionDutyJoy: true }, where }),
+          prisma.booking.count({ where }),
+        ]);
+        return {
+          label: m.label,
+          year: m.year,
+          month: m.month,
+          bruto: agg._sum.precioTotal || 0,
+          comision: agg._sum.comisionDutyJoy || 0,
+          count,
+        };
+      })
+    );
+
+    res.json({ months: results });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'Error al obtener datos mensuales' });
+  }
+});
+
 // GET /admin/users — listar todos los usuarios con filtros
 router.get('/users', verifyToken, soloAdmin, async (req, res) => {
   try {
