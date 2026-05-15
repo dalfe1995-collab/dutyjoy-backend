@@ -464,6 +464,142 @@ router.get('/me/profile-score', verifyToken, async (req, res) => {
   res.json({ score, tips, checks: Object.fromEntries(Object.entries(checks).map(([k, v]) => [k, v.ok])) });
 });
 
+// POST /providers/me/onboarding-agent — conversational AI coach for provider onboarding
+router.post('/me/onboarding-agent', verifyToken, async (req, res) => {
+  if (req.user.rol !== 'PROVEEDOR') {
+    return res.status(403).json({ error: 'Solo proveedores pueden usar el agente de onboarding.' });
+  }
+  if (!openai) {
+    return res.status(503).json({ error: 'Agente no disponible en este momento.' });
+  }
+
+  try {
+    const { messages = [], generateBio = false } = req.body;
+
+    if (!Array.isArray(messages) || messages.length === 0) {
+      return res.status(400).json({ error: 'messages requerido.' });
+    }
+    if (messages.length > 15) {
+      return res.status(400).json({ error: 'Conversación demasiado larga. Inicia una nueva.' });
+    }
+
+    // Load full provider profile
+    const profile = await prisma.providerProfile.findUnique({
+      where: { userId: req.user.id },
+      include: {
+        user: { select: { nombre: true, emailVerificado: true, telefono: true, ciudad: true, createdAt: true } },
+        _count: { select: { reviews: true, bookings: true } },
+      },
+    });
+    if (!profile) return res.status(404).json({ error: 'Perfil no encontrado.' });
+
+    // Compute onboarding checklist status
+    const checks = [
+      { key: 'bio',          done: (profile.bio?.trim().length || 0) >= 50,    label: 'Biografía (mín 50 caracteres)',    peso: 20 },
+      { key: 'servicios',    done: (profile.servicios?.length || 0) >= 1,      label: 'Servicio(s) configurado(s)',       peso: 15 },
+      { key: 'tarifa',       done: (profile.tarifaPorHora || 0) > 0,           label: 'Tarifa por hora',                  peso: 10 },
+      { key: 'ciudades',     done: (profile.ciudades?.length  || 0) >= 1,      label: 'Ciudad(es) de trabajo',            peso: 10 },
+      { key: 'cedula',       done: profile.cedulaStatus === 'aprobado',        label: 'Cédula verificada',                peso: 15 },
+      { key: 'telefono',     done: !!profile.user.telefono,                    label: 'Teléfono de contacto',             peso: 5  },
+      { key: 'experiencia',  done: (profile.aniosExperiencia || 0) > 0,        label: 'Años de experiencia',              peso: 5  },
+      { key: 'horario',      done: !!profile.horario,                          label: 'Horario semanal configurado',      peso: 5  },
+      { key: 'portfolio',    done: (profile.portfolioUrls?.length || 0) > 0,   label: 'Foto(s) de trabajos anteriores',  peso: 10 },
+      { key: 'disponible',   done: profile.disponible === true,                label: 'Perfil visible (disponible = sí)', peso: 5  },
+    ];
+
+    const completados  = checks.filter(c => c.done);
+    const pendientes   = checks.filter(c => !c.done);
+    const score        = completados.reduce((s, c) => s + c.peso, 0);
+    const diasRegistrado = Math.round((Date.now() - new Date(profile.user.createdAt).getTime()) / 86400000);
+    const nextStep     = pendientes[0] || null;
+
+    const systemPrompt = `Eres "Joy", el agente de onboarding de DutyJoy — plataforma colombiana de servicios del hogar.
+Tu rol: guiar a ${profile.user.nombre} paso a paso para completar su perfil y conseguir su primera reserva.
+
+## Estado actual del perfil
+- Score de perfil: ${score}/100
+- Días desde registro: ${diasRegistrado}
+- Reservas completadas: ${profile._count.bookings}
+- Reseñas recibidas: ${profile._count.reviews}
+- Servicios: ${(profile.servicios || []).join(', ') || 'ninguno configurado'}
+- Ciudades: ${(profile.ciudades || []).join(', ') || 'ninguna'}
+- Tarifa: ${profile.tarifaPorHora ? `$${profile.tarifaPorHora.toLocaleString('es-CO')}/hora` : 'no configurada'}
+- Bio: ${profile.bio ? `"${profile.bio.substring(0, 80)}…"` : 'vacía'}
+- Cédula: ${profile.cedulaStatus}
+- Teléfono: ${profile.user.telefono || 'no registrado'}
+- Horario: ${profile.horario ? 'configurado' : 'no configurado'}
+- Portfolio: ${profile.portfolioUrls?.length || 0} foto(s)
+
+## Pasos completados (${completados.length}/${checks.length})
+${completados.map(c => `✅ ${c.label}`).join('\n')}
+
+## Pasos pendientes
+${pendientes.map((c, i) => `${i + 1}. ❌ ${c.label}`).join('\n')}
+
+## Instrucciones
+- Tono: amigable, motivador, colombiano (tuteo). Usa emojis con moderación.
+- Máximo 3-4 oraciones por respuesta. Sé directo y accionable.
+- Siempre termina indicando el siguiente paso más importante.
+- Si te piden generar una bio, créala basada en los servicios, ciudad y experiencia disponibles.
+- Si el perfil está < 50%: enfócate en los pasos de mayor impacto primero.
+- No inventes información que no esté en el contexto.
+- Responde SIEMPRE en español.`;
+
+    const sanitizedMessages = messages
+      .filter(m => ['user', 'assistant'].includes(m.role) && typeof m.content === 'string')
+      .map(m => ({ role: m.role, content: m.content.substring(0, 600) }))
+      .slice(-12);
+
+    const completion = await openai.chat.completions.create({
+      model: 'gpt-4o-mini',
+      max_tokens: 350,
+      temperature: 0.65,
+      messages: [
+        { role: 'system', content: systemPrompt },
+        ...sanitizedMessages,
+      ],
+    });
+
+    const reply = completion.choices[0].message.content.trim();
+
+    // If bio was requested or user's message asks for bio, generate one separately
+    let suggestedBio = null;
+    const lastUserMsg = sanitizedMessages.filter(m => m.role === 'user').pop()?.content?.toLowerCase() || '';
+    const wantsBio = generateBio || lastUserMsg.includes('bio') || lastUserMsg.includes('descripción') || lastUserMsg.includes('presentación');
+
+    if (wantsBio && !profile.bio) {
+      try {
+        const bioComp = await openai.chat.completions.create({
+          model: 'gpt-4o-mini',
+          max_tokens: 200,
+          temperature: 0.7,
+          messages: [{
+            role: 'user',
+            content: `Genera una bio profesional de 2-3 oraciones para un proveedor de servicios del hogar colombiano llamado ${profile.user.nombre}.
+Servicios: ${(profile.servicios || []).join(', ') || 'servicios del hogar'}.
+Ciudad: ${(profile.ciudades || []).join(', ') || 'Colombia'}.
+Experiencia: ${profile.aniosExperiencia ? `${profile.aniosExperiencia} años` : 'experiencia comprobada'}.
+Tono: profesional pero cercano. Sin clichés. Máx 150 caracteres. Solo la bio, sin comillas.`,
+          }],
+        });
+        suggestedBio = bioComp.choices[0].message.content.trim();
+      } catch { /* bio generation is optional */ }
+    }
+
+    res.json({
+      reply,
+      suggestedBio,
+      score,
+      pendingSteps:  pendientes.map(c => c.label),
+      nextStep:      nextStep?.label || null,
+      pct:           Math.round(score),
+    });
+  } catch (error) {
+    console.error('[onboarding-agent]', error);
+    res.status(500).json({ error: 'Error en el agente de onboarding.' });
+  }
+});
+
 // POST /providers/smart-match — AI-powered provider matching (semantic + 8-factor scoring)
 router.post('/smart-match', verifyToken, async (req, res) => {
   try {

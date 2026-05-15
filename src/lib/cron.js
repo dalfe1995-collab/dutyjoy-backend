@@ -407,6 +407,11 @@ function iniciarCrons() {
     timezone: 'America/Bogota',
   });
 
+  // Onboarding nudges para proveedores nuevos — diariamente a las 09:00 AM
+  cron.schedule('0 9 * * *', enviarNudgesOnboarding, {
+    timezone: 'America/Bogota',
+  });
+
   // Re-engagement emails — lunes a las 10:00 AM
   cron.schedule('0 10 * * 1', enviarReengagementSemanal, {
     timezone: 'America/Bogota',
@@ -417,7 +422,7 @@ function iniciarCrons() {
     timezone: 'America/Bogota',
   });
 
-  console.log('⏰  Crons activos: recordatorio24h (:00) · expiracionReservas (:30) · autoCompletar (:45) · tiempoRespuesta (03:00) · tasaAceptacion (03:30) · recurrencias (07:00) · embeddings (02:00) · fraude (04:00) · reengagement (lun 10:00) · digest (lun 10:30)');
+  console.log('⏰  Crons activos: recordatorio24h (:00) · expiracionReservas (:30) · autoCompletar (:45) · tiempoRespuesta (03:00) · tasaAceptacion (03:30) · recurrencias (07:00) · embeddings (02:00) · fraude (04:00) · onboarding (09:00) · reengagement (lun 10:00) · digest (lun 10:30)');
 }
 
 /**
@@ -505,6 +510,98 @@ Responde SOLO JSON: {"fraudScore":<0.0-1.0>,"flags":[<texto_generico|primera_res
     console.log(`[CRON] Fraude: ${sinChequear.length} reseñas analizadas, ${flagged} sospechosas`);
   } catch (err) {
     console.error('[CRON] Error escaneo fraude:', err.message);
+  }
+}
+
+/**
+ * Cron: onboarding nudges for new providers with incomplete profiles
+ * Runs daily at 09:00 AM. Targets providers registered < 14 days with profile < 70%.
+ * Max 15 emails per run.
+ */
+async function enviarNudgesOnboarding() {
+  if (!process.env.RESEND_API_KEY) return;
+  try {
+    const hace14d = new Date(Date.now() - 14 * 86400000);
+    const proveedores = await prisma.providerProfile.findMany({
+      where: {
+        user: { createdAt: { gte: hace14d }, rol: 'PROVEEDOR', activo: true },
+      },
+      include: {
+        user: { select: { email: true, nombre: true, telefono: true, emailVerificado: true } },
+      },
+      take: 15,
+    });
+
+    const SCORE_FIELDS = (p) => {
+      let s = 0;
+      if ((p.bio?.trim().length || 0) >= 50)     s += 20;
+      if ((p.servicios?.length || 0) >= 1)        s += 15;
+      if ((p.tarifaPorHora || 0) > 0)             s += 10;
+      if ((p.ciudades?.length  || 0) >= 1)        s += 10;
+      if (p.cedulaStatus === 'aprobado')           s += 15;
+      if (p.user.telefono)                         s += 5;
+      if ((p.aniosExperiencia || 0) > 0)           s += 5;
+      if (p.horario)                               s += 5;
+      if ((p.portfolioUrls?.length || 0) > 0)     s += 10;
+      if (p.disponible)                            s += 5;
+      return s;
+    };
+
+    const APP_URL = process.env.FRONTEND_URL || 'https://app.dutyjoy.com';
+    const resend = process.env.RESEND_API_KEY ? require('resend').Resend : null;
+    if (!resend) return;
+    const resendClient = new resend(process.env.RESEND_API_KEY);
+
+    let sent = 0;
+    for (const p of proveedores) {
+      try {
+        const score = SCORE_FIELDS(p);
+        if (score >= 70) continue; // already well-configured
+
+        const pendientes = [];
+        if ((p.bio?.trim().length || 0) < 50)    pendientes.push('tu biografía');
+        if (!(p.servicios?.length >= 1))          pendientes.push('tus servicios');
+        if (!(p.tarifaPorHora > 0))              pendientes.push('tu tarifa por hora');
+        if (p.cedulaStatus === 'sin_enviar')      pendientes.push('tu cédula de identidad');
+        if (!(p.portfolioUrls?.length > 0))      pendientes.push('fotos de trabajos anteriores');
+
+        if (!pendientes.length) continue;
+
+        const nextItem = pendientes[0];
+        const html = `
+          <div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f5f5f5;margin:0;padding:0">
+            <div style="max-width:560px;margin:32px auto;background:#1a1a1a;border-radius:16px;overflow:hidden">
+              <div style="background:#FFC534;padding:28px 32px;font-size:22px;font-weight:800;color:#0f0f0f">
+                ⚡ DutyJoy — Tu perfil necesita atención
+              </div>
+              <div style="padding:28px 32px;color:#e5e5e5;font-size:15px;line-height:1.6">
+                <p>Hola <strong>${p.user.nombre}</strong>,</p>
+                <p>Tu perfil está al <strong style="color:#FFC534">${score}%</strong> de completitud. Los perfiles completos reciben <strong>3x más reservas</strong>.</p>
+                <p>Tu próximo paso: <strong style="color:#0ABFBC">agrega ${nextItem}</strong>.</p>
+                <p style="font-size:13px;color:#888">También puedes hablar con nuestro <strong>Agente IA</strong> en el dashboard — te guía paso a paso y puede generar tu bio automáticamente.</p>
+                <a href="${APP_URL}/dashboard" style="display:inline-block;margin-top:20px;padding:14px 28px;background:#FFC534;color:#0f0f0f;font-weight:700;border-radius:10px;text-decoration:none;font-size:15px">
+                  Completar mi perfil →
+                </a>
+              </div>
+              <div style="padding:16px 32px;background:#111;color:#666;font-size:12px;text-align:center">
+                © 2026 DutyJoy · <a href="${APP_URL}" style="color:#FFC534">app.dutyjoy.com</a>
+              </div>
+            </div>
+          </div>`;
+
+        await resendClient.emails.send({
+          from: 'DutyJoy <notificaciones@dutyjoy.com>',
+          to: p.user.email,
+          subject: `Tu perfil está al ${score}% — falta ${nextItem}`,
+          html,
+        });
+        sent++;
+        await new Promise(r => setTimeout(r, 400));
+      } catch { /* skip */ }
+    }
+    if (sent > 0) console.log(`[CRON] Onboarding nudges: ${sent} enviados`);
+  } catch (err) {
+    console.error('[CRON] Error onboarding nudges:', err.message);
   }
 }
 
@@ -620,4 +717,5 @@ module.exports = {
   escanearResenasFraude,
   enviarReengagementSemanal,
   enviarDigestProveedoresSemanal,
+  enviarNudgesOnboarding,
 };
