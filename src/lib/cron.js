@@ -2,6 +2,7 @@ const cron  = require('node-cron');
 const prisma = require('./prisma');
 const email  = require('./email');
 const { updateProviderEmbedding } = require('./embeddings');
+const { enviarReengagement, enviarDigestProveedor } = require('./emailPersonalizado');
 const OpenAI = require('openai');
 const openai = process.env.OPENAI_API_KEY ? new OpenAI({ apiKey: process.env.OPENAI_API_KEY }) : null;
 
@@ -406,7 +407,17 @@ function iniciarCrons() {
     timezone: 'America/Bogota',
   });
 
-  console.log('⏰  Crons activos: recordatorio24h (:00) · expiracionReservas (:30) · autoCompletar (:45) · tiempoRespuesta (03:00) · tasaAceptacion (03:30) · recurrencias (07:00) · embeddings (02:00) · fraude (04:00)');
+  // Re-engagement emails — lunes a las 10:00 AM
+  cron.schedule('0 10 * * 1', enviarReengagementSemanal, {
+    timezone: 'America/Bogota',
+  });
+
+  // Digest semanal proveedores — lunes a las 10:30 AM
+  cron.schedule('30 10 * * 1', enviarDigestProveedoresSemanal, {
+    timezone: 'America/Bogota',
+  });
+
+  console.log('⏰  Crons activos: recordatorio24h (:00) · expiracionReservas (:30) · autoCompletar (:45) · tiempoRespuesta (03:00) · tasaAceptacion (03:30) · recurrencias (07:00) · embeddings (02:00) · fraude (04:00) · reengagement (lun 10:00) · digest (lun 10:30)');
 }
 
 /**
@@ -497,6 +508,106 @@ Responde SOLO JSON: {"fraudScore":<0.0-1.0>,"flags":[<texto_generico|primera_res
   }
 }
 
+/**
+ * Cron: re-engagement emails for clients inactive 30-60 days
+ * Runs every Monday at 10:00 AM. Max 20 emails per run to stay within Resend limits.
+ */
+async function enviarReengagementSemanal() {
+  if (!process.env.OPENAI_API_KEY || !process.env.RESEND_API_KEY) return;
+  try {
+    const desde = new Date(Date.now() - 60 * 86400000);
+    const hasta = new Date(Date.now() - 30 * 86400000);
+
+    const clientes = await prisma.user.findMany({
+      where: {
+        rol: 'CLIENTE',
+        activo: true,
+        bookingsComoCliente: { some: { createdAt: { gte: desde, lte: hasta } } },
+      },
+      include: {
+        bookingsComoCliente: {
+          where: { estado: 'COMPLETADO' },
+          orderBy: { createdAt: 'desc' },
+          take: 5,
+          select: { tipoServicio: true, createdAt: true, proveedor: { select: { user: { select: { nombre: true } } } } },
+        },
+      },
+      take: 20,
+    });
+
+    let sent = 0;
+    for (const u of clientes) {
+      try {
+        const lastBooking = u.bookingsComoCliente[0];
+        const diasInactivo = lastBooking
+          ? Math.round((Date.now() - new Date(lastBooking.createdAt).getTime()) / 86400000)
+          : 45;
+        const svcCount = {};
+        u.bookingsComoCliente.forEach(b => { svcCount[b.tipoServicio] = (svcCount[b.tipoServicio] || 0) + 1; });
+        const servicios = Object.entries(svcCount).sort((a, b) => b[1] - a[1]).map(([s]) => s);
+        const provNombres = {};
+        u.bookingsComoCliente.forEach(b => { const n = b.proveedor?.user?.nombre; if (n) provNombres[n] = (provNombres[n]||0)+1; });
+        const proveedorFavorito = Object.entries(provNombres).sort((a,b)=>b[1]-a[1])[0]?.[0]||null;
+
+        await enviarReengagement({
+          to: u.email,
+          cliente: { nombre: u.nombre, ciudad: u.ciudad, completadas: u.bookingsComoCliente.length, servicios, proveedorFavorito, diasInactivo },
+        });
+        sent++;
+        await new Promise(r => setTimeout(r, 500)); // 500ms between emails
+      } catch { /* skip this user */ }
+    }
+    if (sent > 0) console.log(`[CRON] Re-engagement: ${sent} emails enviados`);
+  } catch (err) {
+    console.error('[CRON] Error re-engagement:', err.message);
+  }
+}
+
+/**
+ * Cron: weekly digest emails for providers
+ * Runs every Monday at 10:30 AM. Max 30 providers per run.
+ */
+async function enviarDigestProveedoresSemanal() {
+  if (!process.env.OPENAI_API_KEY || !process.env.RESEND_API_KEY) return;
+  try {
+    const hace7d = new Date(Date.now() - 7 * 86400000);
+    const proveedores = await prisma.providerProfile.findMany({
+      where: { disponible: true, verificado: true },
+      include: { user: { select: { email: true, nombre: true } } },
+      take: 30,
+    });
+
+    let sent = 0;
+    for (const p of proveedores) {
+      try {
+        const bookings7d = await prisma.booking.findMany({
+          where: { proveedorId: p.id, createdAt: { gte: hace7d }, estado: 'COMPLETADO' },
+          select: { precioTotal: true, cliente: { select: { nombre: true } } },
+        });
+        const ingresos7d  = bookings7d.reduce((s, b) => s + (b.precioTotal || 0), 0);
+        const topCliente  = bookings7d[0]?.cliente?.nombre || null;
+
+        await enviarDigestProveedor({
+          to: p.user.email,
+          proveedor: {
+            nombre:      p.user.nombre,
+            ingresos7d,
+            reservas7d:  bookings7d.length,
+            calificacion: p.calificacion,
+            vistas7d:    Math.round((p.totalViews || 0) * 0.15),
+            topCliente,
+          },
+        });
+        sent++;
+        await new Promise(r => setTimeout(r, 400));
+      } catch { /* skip */ }
+    }
+    if (sent > 0) console.log(`[CRON] Digest proveedores: ${sent} emails enviados`);
+  } catch (err) {
+    console.error('[CRON] Error digest:', err.message);
+  }
+}
+
 module.exports = {
   iniciarCrons,
   completarReservasFinalizadas,
@@ -507,4 +618,6 @@ module.exports = {
   generarRecurrencias,
   generarEmbeddingsPendientes,
   escanearResenasFraude,
+  enviarReengagementSemanal,
+  enviarDigestProveedoresSemanal,
 };

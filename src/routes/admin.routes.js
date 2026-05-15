@@ -1429,4 +1429,146 @@ router.get('/analytics/cohort', verifyToken, soloAdmin, async (req, res) => {
   }
 });
 
+// ── AI Email Personalization ──────────────────────────────────────────────
+
+const { generarContenidoReengagement, enviarReengagement, enviarDigestProveedor } = require('../lib/emailPersonalizado');
+
+// GET /admin/campaigns/reengage-candidates — clients inactive 30-90 days
+router.get('/campaigns/reengage-candidates', verifyToken, soloAdmin, async (req, res) => {
+  try {
+    const { minDias = 30, maxDias = 90, limit = 50 } = req.query;
+    const desde = new Date(Date.now() - parseInt(maxDias) * 86400000);
+    const hasta = new Date(Date.now() - parseInt(minDias) * 86400000);
+
+    // Clients whose last booking was between minDias and maxDias ago
+    const candidatos = await prisma.user.findMany({
+      where: {
+        rol: 'CLIENTE',
+        activo: true,
+        bookingsComoCliente: {
+          some: {
+            createdAt: { gte: desde, lte: hasta },
+          },
+        },
+      },
+      include: {
+        bookingsComoCliente: {
+          where: { estado: 'COMPLETADO' },
+          orderBy: { createdAt: 'desc' },
+          take: 10,
+          select: { tipoServicio: true, createdAt: true, proveedorId: true, proveedor: { select: { user: { select: { nombre: true } } } } },
+        },
+      },
+      take: parseInt(limit),
+    });
+
+    const result = candidatos.map(u => {
+      const bookings    = u.bookingsComoCliente;
+      const lastBooking = bookings[0];
+      const diasInactivo = lastBooking
+        ? Math.round((Date.now() - new Date(lastBooking.createdAt).getTime()) / 86400000)
+        : null;
+
+      // Most-used services
+      const svcCount = {};
+      bookings.forEach(b => { svcCount[b.tipoServicio] = (svcCount[b.tipoServicio] || 0) + 1; });
+      const servicios = Object.entries(svcCount).sort((a, b) => b[1] - a[1]).map(([s]) => s);
+
+      // Favorite provider
+      const provCount = {};
+      bookings.forEach(b => { if (b.proveedor?.user?.nombre) provCount[b.proveedor.user.nombre] = (provCount[b.proveedor.user.nombre] || 0) + 1; });
+      const proveedorFavorito = Object.entries(provCount).sort((a, b) => b[1] - a[1])[0]?.[0] || null;
+
+      return {
+        id:               u.id,
+        nombre:           u.nombre,
+        email:            u.email,
+        ciudad:           u.ciudad,
+        diasInactivo,
+        completadas:      bookings.length,
+        servicios,
+        proveedorFavorito,
+      };
+    }).filter(c => c.diasInactivo !== null);
+
+    res.json({ candidates: result, total: result.length });
+  } catch (e) {
+    console.error('[campaigns/reengage-candidates]', e);
+    res.status(500).json({ error: 'Error al obtener candidatos.' });
+  }
+});
+
+// POST /admin/campaigns/preview-reengage — generate AI preview without sending
+router.post('/campaigns/preview-reengage', verifyToken, soloAdmin, async (req, res) => {
+  if (!openai) return res.status(503).json({ error: 'OPENAI_API_KEY no configurado.' });
+  try {
+    const { cliente } = req.body;
+    if (!cliente?.nombre) return res.status(400).json({ error: 'cliente.nombre requerido.' });
+    const content = await generarContenidoReengagement(cliente);
+    if (!content) return res.status(502).json({ error: 'Error generando contenido.' });
+    res.json({ content });
+  } catch (e) {
+    console.error('[campaigns/preview-reengage]', e);
+    res.status(500).json({ error: 'Error al generar preview.' });
+  }
+});
+
+// POST /admin/campaigns/send-reengage — send AI re-engagement to one client
+router.post('/campaigns/send-reengage', verifyToken, soloAdmin, async (req, res) => {
+  if (!openai) return res.status(503).json({ error: 'OPENAI_API_KEY no configurado.' });
+  try {
+    const { userId, cliente } = req.body;
+    if (!userId) return res.status(400).json({ error: 'userId requerido.' });
+
+    const user = await prisma.user.findUnique({ where: { id: userId }, select: { email: true, nombre: true } });
+    if (!user) return res.status(404).json({ error: 'Usuario no encontrado.' });
+
+    const result = await enviarReengagement({ to: user.email, cliente: { ...cliente, nombre: user.nombre } });
+    if (!result) return res.status(502).json({ error: 'Error al enviar.' });
+
+    res.json({ sent: result.sent, content: result.content, email: user.email });
+  } catch (e) {
+    console.error('[campaigns/send-reengage]', e);
+    res.status(500).json({ error: 'Error al enviar email.' });
+  }
+});
+
+// POST /admin/campaigns/send-digest/:providerId — weekly digest to one provider
+router.post('/campaigns/send-digest/:providerId', verifyToken, soloAdmin, async (req, res) => {
+  if (!openai) return res.status(503).json({ error: 'OPENAI_API_KEY no configurado.' });
+  try {
+    const profile = await prisma.providerProfile.findUnique({
+      where: { id: req.params.providerId },
+      include: { user: { select: { email: true, nombre: true } } },
+    });
+    if (!profile) return res.status(404).json({ error: 'Proveedor no encontrado.' });
+
+    const hace7d = new Date(Date.now() - 7 * 86400000);
+    const bookings7d = await prisma.booking.findMany({
+      where: { proveedorId: profile.id, createdAt: { gte: hace7d }, estado: 'COMPLETADO' },
+      select: { precioTotal: true, cliente: { select: { nombre: true } } },
+    });
+
+    const ingresos7d = bookings7d.reduce((s, b) => s + (b.precioTotal || 0), 0);
+    const topCliente = bookings7d[0]?.cliente?.nombre || null;
+
+    const result = await enviarDigestProveedor({
+      to: profile.user.email,
+      proveedor: {
+        nombre:    profile.user.nombre,
+        ingresos7d,
+        reservas7d: bookings7d.length,
+        calificacion: profile.calificacion,
+        vistas7d: Math.round((profile.totalViews || 0) * 0.15), // approx
+        topCliente,
+      },
+    });
+
+    res.json({ sent: result?.sent, content: result?.content, email: profile.user.email });
+  } catch (e) {
+    console.error('[campaigns/send-digest]', e);
+    res.status(500).json({ error: 'Error al enviar digest.' });
+  }
+});
+
 module.exports = router;
