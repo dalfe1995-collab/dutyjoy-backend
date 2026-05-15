@@ -697,6 +697,141 @@ Criterios:
   }
 });
 
+// ── Fake Review Detection ────────────────────────────────────────────────
+
+// Shared fraud analysis logic (used by endpoint + cron)
+async function analyzeReviewFraud(review, clientReviewCount, bookingCompletedAt) {
+  if (!openai) return null;
+
+  const minsSinceCompletion = bookingCompletedAt
+    ? Math.round((new Date(review.createdAt) - new Date(bookingCompletedAt)) / 60000)
+    : null;
+
+  const prompt = `Eres un sistema de detección de reseñas fraudulentas para DutyJoy, una plataforma colombiana de servicios del hogar.
+
+## Reseña a analizar
+- Calificación: ${review.calificacion}/5
+- Comentario: "${review.comentario || '(sin comentario)'}"
+- Total reseñas del cliente (histórico): ${clientReviewCount}
+- Minutos desde que se completó el servicio: ${minsSinceCompletion ?? 'desconocido'}
+
+## Patrones de fraude a detectar
+- texto_generico: comentario demasiado corto o genérico (< 15 chars, o solo "excelente"/"muy bueno"/"recomendado")
+- primera_resena: es la primera o segunda reseña del cliente (sospechoso si calificación = 5)
+- velocidad_sospechosa: reseña publicada en menos de 3 minutos tras completar el servicio
+- sin_detalle: calificación 5 con comentario vacío o menos de 20 caracteres
+- lenguaje_marketing: usa frases de marketing ("altamente recomendado", "mejor servicio", "100%")
+- inconsistencia: calificación alta pero comentario neutro/negativo o viceversa
+- patron_bot: texto perfectamente genérico o con errores que sugieren traducción automática
+
+## Tu respuesta
+Responde SOLO con JSON válido:
+{
+  "fraudScore": <0.0 a 1.0; 0.0=claramente real, 1.0=claramente falsa>,
+  "flags": [<lista de patrones detectados de la lista de arriba>],
+  "razonamiento": "<explicación breve en español, máx 150 caracteres>"
+}
+
+Umbral sugerido: fraudScore >= 0.65 = sospechosa, >= 0.85 = muy probable fraude.`;
+
+  const completion = await openai.chat.completions.create({
+    model: 'gpt-4o-mini',
+    max_tokens: 200,
+    temperature: 0.1,
+    response_format: { type: 'json_object' },
+    messages: [{ role: 'user', content: prompt }],
+  });
+
+  return JSON.parse(completion.choices[0].message.content);
+}
+
+// POST /admin/reviews/:id/fraud-check — AI checks a single review
+router.post('/reviews/:id/fraud-check', verifyToken, soloAdmin, async (req, res) => {
+  if (!openai) return res.status(503).json({ error: 'OPENAI_API_KEY no configurado.' });
+
+  try {
+    const review = await prisma.review.findUnique({
+      where: { id: req.params.id },
+      include: {
+        cliente:  { select: { id: true } },
+        booking:  { select: { estado: true, updatedAt: true } },
+      },
+    });
+    if (!review) return res.status(404).json({ error: 'Reseña no encontrada.' });
+
+    // Count client's total reviews
+    const clientReviewCount = await prisma.review.count({ where: { clienteId: review.clienteId } });
+    const bookingCompletedAt = review.booking?.estado === 'COMPLETADO' ? review.booking.updatedAt : null;
+
+    const result = await analyzeReviewFraud(review, clientReviewCount, bookingCompletedAt);
+    if (!result) return res.status(502).json({ error: 'Error en análisis IA.' });
+
+    const updated = await prisma.review.update({
+      where: { id: review.id },
+      data: {
+        fraudScore:      result.fraudScore,
+        fraudFlags:      result.flags || [],
+        fraudCheckedAt:  new Date(),
+      },
+    });
+
+    res.json({ review: updated, fraudScore: result.fraudScore, flags: result.flags, razonamiento: result.razonamiento });
+  } catch (e) {
+    console.error('[admin/reviews/fraud-check]', e);
+    res.status(500).json({ error: 'Error al analizar reseña.' });
+  }
+});
+
+// GET /admin/reviews/flagged — lista reseñas sospechosas (fraudScore >= 0.5)
+router.get('/reviews/flagged', verifyToken, soloAdmin, async (req, res) => {
+  try {
+    const { threshold = 0.5, page = 1, limit = 20 } = req.query;
+    const take = Math.min(parseInt(limit) || 20, 100);
+    const skip = (Math.max(parseInt(page) || 1, 1) - 1) * take;
+
+    const where = { fraudScore: { gte: parseFloat(threshold) } };
+    const [reviews, total] = await Promise.all([
+      prisma.review.findMany({
+        where,
+        orderBy: { fraudScore: 'desc' },
+        skip, take,
+        include: {
+          cliente:  { select: { nombre: true, email: true } },
+          proveedor: { include: { user: { select: { nombre: true } } } },
+          booking:  { select: { tipoServicio: true, fechaServicio: true } },
+        },
+      }),
+      prisma.review.count({ where }),
+    ]);
+
+    const [unchecked, highRisk] = await Promise.all([
+      prisma.review.count({ where: { fraudCheckedAt: null } }),
+      prisma.review.count({ where: { fraudScore: { gte: 0.85 } } }),
+    ]);
+
+    res.json({ reviews, total, totalPages: Math.ceil(total / take), stats: { unchecked, highRisk, flagged: total } });
+  } catch (e) {
+    console.error('[admin/reviews/flagged]', e);
+    res.status(500).json({ error: 'Error al obtener reseñas.' });
+  }
+});
+
+// PATCH /admin/reviews/:id/visibility — ocultar o mostrar reseña
+router.patch('/reviews/:id/visibility', verifyToken, soloAdmin, async (req, res) => {
+  try {
+    const { oculta } = req.body;
+    if (typeof oculta !== 'boolean') return res.status(400).json({ error: 'oculta debe ser true o false.' });
+    const updated = await prisma.review.update({
+      where: { id: req.params.id },
+      data:  { fraudOculta: oculta },
+    });
+    res.json({ mensaje: oculta ? 'Reseña ocultada' : 'Reseña restaurada', review: updated });
+  } catch (e) {
+    console.error('[admin/reviews/visibility]', e);
+    res.status(500).json({ error: 'Error al actualizar visibilidad.' });
+  }
+});
+
 // ── CRM: Clients ─────────────────────────────────────────────────────────
 
 // GET /admin/crm/clients — paginated client list with spend tiers + LTV + tags

@@ -2,6 +2,8 @@ const cron  = require('node-cron');
 const prisma = require('./prisma');
 const email  = require('./email');
 const { updateProviderEmbedding } = require('./embeddings');
+const OpenAI = require('openai');
+const openai = process.env.OPENAI_API_KEY ? new OpenAI({ apiKey: process.env.OPENAI_API_KEY }) : null;
 
 /**
  * Cron: recordatorio 24h antes del servicio
@@ -399,7 +401,12 @@ function iniciarCrons() {
     timezone: 'America/Bogota',
   });
 
-  console.log('⏰  Crons activos: recordatorio24h (:00) · expiracionReservas (:30) · autoCompletar (:45) · tiempoRespuesta (03:00) · tasaAceptacion (03:30) · recurrencias (07:00) · embeddings (02:00)');
+  // Escanear reseñas no revisadas por fraude — diariamente a las 04:00 AM
+  cron.schedule('0 4 * * *', escanearResenasFraude, {
+    timezone: 'America/Bogota',
+  });
+
+  console.log('⏰  Crons activos: recordatorio24h (:00) · expiracionReservas (:30) · autoCompletar (:45) · tiempoRespuesta (03:00) · tasaAceptacion (03:30) · recurrencias (07:00) · embeddings (02:00) · fraude (04:00)');
 }
 
 /**
@@ -429,6 +436,67 @@ async function generarEmbeddingsPendientes() {
   }
 }
 
+/**
+ * Cron: escanear reseñas sin análisis de fraude
+ * Corre diariamente a las 04:00. Procesa hasta 40 reseñas por run.
+ */
+async function escanearResenasFraude() {
+  if (!openai) return;
+  try {
+    const sinChequear = await prisma.review.findMany({
+      where: { fraudCheckedAt: null },
+      include: {
+        booking: { select: { estado: true, updatedAt: true } },
+      },
+      take: 40,
+      orderBy: { createdAt: 'desc' },
+    });
+    if (!sinChequear.length) return;
+
+    let flagged = 0;
+    for (const review of sinChequear) {
+      try {
+        const clientCount = await prisma.review.count({ where: { clienteId: review.clienteId } });
+        const completedAt = review.booking?.estado === 'COMPLETADO' ? review.booking.updatedAt : null;
+        const minsSince   = completedAt
+          ? Math.round((new Date(review.createdAt) - new Date(completedAt)) / 60000)
+          : null;
+
+        const prompt = `Detecta fraude en esta reseña de servicios del hogar.
+Calificación: ${review.calificacion}/5
+Comentario: "${review.comentario || '(sin comentario)'}"
+Total reseñas del cliente: ${clientCount}
+Minutos desde servicio completado: ${minsSince ?? 'desconocido'}
+
+Responde SOLO JSON: {"fraudScore":<0.0-1.0>,"flags":[<texto_generico|primera_resena|velocidad_sospechosa|sin_detalle|lenguaje_marketing|inconsistencia|patron_bot>],"razonamiento":"<max 100 chars>"}`;
+
+        const completion = await openai.chat.completions.create({
+          model: 'gpt-4o-mini',
+          max_tokens: 150,
+          temperature: 0.1,
+          response_format: { type: 'json_object' },
+          messages: [{ role: 'user', content: prompt }],
+        });
+
+        const result = JSON.parse(completion.choices[0].message.content);
+        await prisma.review.update({
+          where: { id: review.id },
+          data: {
+            fraudScore:     result.fraudScore,
+            fraudFlags:     result.flags || [],
+            fraudCheckedAt: new Date(),
+          },
+        });
+        if (result.fraudScore >= 0.65) flagged++;
+        await new Promise(r => setTimeout(r, 300)); // rate limit
+      } catch { /* skip this review, try next */ }
+    }
+    console.log(`[CRON] Fraude: ${sinChequear.length} reseñas analizadas, ${flagged} sospechosas`);
+  } catch (err) {
+    console.error('[CRON] Error escaneo fraude:', err.message);
+  }
+}
+
 module.exports = {
   iniciarCrons,
   completarReservasFinalizadas,
@@ -438,4 +506,5 @@ module.exports = {
   actualizarTasasAceptacion,
   generarRecurrencias,
   generarEmbeddingsPendientes,
+  escanearResenasFraude,
 };

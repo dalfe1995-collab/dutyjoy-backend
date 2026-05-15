@@ -142,6 +142,11 @@ model Review {
   calificacion        Int      // 1 a 5
   comentario          String?
   respuestaProveedor  String?  // respuesta pública del proveedor a la reseña
+  // ── Fraud detection ──────────────────────────────────────────────────────
+  fraudScore          Float?   // 0.0 (clean) → 1.0 (likely fake)
+  fraudFlags          String[] // detected patterns, e.g. ["texto_generico","primera_resena"]
+  fraudCheckedAt      DateTime?
+  fraudOculta         Boolean  @default(false) // admin hidó esta reseña
   createdAt           DateTime @default(now())
 }
 

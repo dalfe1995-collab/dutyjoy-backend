@@ -78,11 +78,46 @@ router.post('/', verifyToken, async (req, res) => {
   }
 });
 
+// PATCH /reviews/:id/respond — proveedor responde a una reseña (pública)
+router.patch('/:id/respond', verifyToken, async (req, res) => {
+  try {
+    if (req.user.rol !== 'PROVEEDOR') {
+      return res.status(403).json({ error: 'Solo los proveedores pueden responder reseñas' });
+    }
+    const { respuesta } = req.body;
+    if (!respuesta || typeof respuesta !== 'string' || respuesta.trim().length === 0) {
+      return res.status(400).json({ error: 'La respuesta no puede estar vacía' });
+    }
+    if (respuesta.trim().length > 800) {
+      return res.status(400).json({ error: 'La respuesta no puede superar 800 caracteres' });
+    }
+
+    // Verificar que la reseña pertenece a este proveedor
+    const profile = await prisma.providerProfile.findUnique({ where: { userId: req.user.id } });
+    if (!profile) return res.status(404).json({ error: 'Perfil no encontrado' });
+
+    const review = await prisma.review.findUnique({ where: { id: req.params.id } });
+    if (!review) return res.status(404).json({ error: 'Reseña no encontrada' });
+    if (review.proveedorId !== profile.id) return res.status(403).json({ error: 'No autorizado' });
+    if (review.respuestaProveedor) return res.status(400).json({ error: 'Ya respondiste esta reseña' });
+
+    const updated = await prisma.review.update({
+      where: { id: req.params.id },
+      data:  { respuestaProveedor: respuesta.trim() },
+    });
+
+    res.json({ mensaje: 'Respuesta publicada', review: updated });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'Error al guardar respuesta' });
+  }
+});
+
 // GET /reviews/provider/:id — reseñas públicas de un proveedor
 router.get('/provider/:id', async (req, res) => {
   try {
     const reviews = await prisma.review.findMany({
-      where: { proveedorId: req.params.id },
+      where: { proveedorId: req.params.id, fraudOculta: false },
       include: { cliente: { select: { nombre: true } } },
       orderBy: { createdAt: 'desc' },
     });
