@@ -113,18 +113,76 @@ router.patch('/:id/respond', verifyToken, async (req, res) => {
   }
 });
 
-// GET /reviews/provider/:id — reseñas públicas de un proveedor
+// GET /reviews/provider/:id — reseñas públicas de un proveedor (?sort=recent|best|worst, ?rating=1-5)
 router.get('/provider/:id', async (req, res) => {
   try {
+    const { sort = 'recent', rating } = req.query;
+    const orderBy = sort === 'best'  ? { calificacion: 'desc' }
+                  : sort === 'worst' ? { calificacion: 'asc' }
+                  : { createdAt: 'desc' };
+    const ratingFilter = rating ? { calificacion: parseInt(rating, 10) } : {};
     const reviews = await prisma.review.findMany({
-      where: { proveedorId: req.params.id, fraudOculta: false },
-      include: { cliente: { select: { nombre: true } } },
-      orderBy: { createdAt: 'desc' },
+      where: { proveedorId: req.params.id, fraudOculta: false, ...ratingFilter },
+      include: {
+        cliente: { select: { nombre: true } },
+        booking: { select: { tipoServicio: true } },
+      },
+      orderBy,
     });
     res.json(reviews);
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: 'Error al obtener reseñas' });
+  }
+});
+
+// POST /reviews/:id/suggest-response — AI suggests a polite public reply for the provider
+router.post('/:id/suggest-response', verifyToken, async (req, res) => {
+  try {
+    if (req.user.rol !== 'PROVEEDOR') {
+      return res.status(403).json({ error: 'Solo los proveedores pueden solicitar sugerencias' });
+    }
+    const profile = await prisma.providerProfile.findUnique({ where: { userId: req.user.id } });
+    if (!profile) return res.status(404).json({ error: 'Perfil no encontrado' });
+
+    const review = await prisma.review.findUnique({
+      where: { id: req.params.id },
+      include: { cliente: { select: { nombre: true } } },
+    });
+    if (!review) return res.status(404).json({ error: 'Reseña no encontrada' });
+    if (review.proveedorId !== profile.id) return res.status(403).json({ error: 'No autorizado' });
+
+    const { OpenAI } = require('openai');
+    const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+
+    const completion = await openai.chat.completions.create({
+      model: 'gpt-4o-mini',
+      messages: [{
+        role: 'user',
+        content: `Eres un proveedor de servicios del hogar en Colombia respondiendo públicamente a una reseña.
+
+Reseña recibida:
+- Calificación: ${review.calificacion}/5
+- Cliente: ${review.cliente?.nombre || 'Cliente'}
+- Comentario: "${review.comentario || '(sin comentario)'}"
+
+Escribe una respuesta pública breve (máx 180 palabras) que sea:
+- Agradecida y profesional
+- En español colombiano natural y cálido
+- Específica al comentario (nunca genérica)
+- Si calificación ≤ 3: empática, constructiva, ofrece solución
+- Si calificación ≥ 4: agradece, refuerza confianza, invita a volver
+
+Devuelve SOLO el texto de la respuesta.`,
+      }],
+      max_tokens: 280,
+      temperature: 0.75,
+    });
+
+    res.json({ sugerencia: completion.choices[0].message.content.trim() });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'Error generando sugerencia' });
   }
 });
 
