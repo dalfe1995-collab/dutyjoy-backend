@@ -1259,4 +1259,163 @@ router.get('/me/upcoming', verifyToken, async (req, res) => {
   }
 });
 
+// ── Voice Onboarding ──────────────────────────────────────────────────────
+
+// Interview questions the voice agent asks
+const INTERVIEW_QUESTIONS = [
+  { id: 'experiencia',     text: '¿Cuántos años de experiencia tienes en los servicios que ofreces?' },
+  { id: 'servicios',       text: '¿Qué servicios ofreces exactamente? Por ejemplo: limpieza de hogares, plomería, electricidad…' },
+  { id: 'ciudades',        text: '¿En qué ciudades o barrios puedes ofrecer tus servicios?' },
+  { id: 'tarifa',          text: '¿Cuánto cobras por hora por tus servicios?' },
+  { id: 'historia',        text: '¿Puedes contarme brevemente sobre tus trabajos anteriores? ¿Para quién has trabajado o qué proyectos has hecho?' },
+  { id: 'fortaleza',       text: '¿Cuál es tu mayor fortaleza como proveedor de servicios?' },
+  { id: 'disponibilidad',  text: '¿En qué horarios estás disponible? ¿Trabajas fines de semana?' },
+  { id: 'referencia1',     text: '¿Puedes darnos el nombre y teléfono de una persona que pueda dar referencias tuyas? Puede ser un cliente anterior o un empleador.' },
+  { id: 'antecedentes',    text: '¿Tienes algún antecedente judicial, penal o disciplinario que debamos conocer? Responde con sinceridad — esto es confidencial y parte de nuestro proceso de verificación.' },
+  { id: 'compromiso',      text: 'Por último: ¿Te comprometes a tratar a todos los clientes con respeto, a cumplir los horarios acordados y a mantener la calidad del servicio?' },
+];
+
+// GET /providers/me/interview-questions — returns the interview script
+router.get('/me/interview-questions', verifyToken, async (req, res) => {
+  if (req.user.rol !== 'PROVEEDOR') return res.status(403).json({ error: 'Solo proveedores.' });
+  res.json({ questions: INTERVIEW_QUESTIONS });
+});
+
+// POST /providers/me/voice-onboarding — processes full interview transcript, updates profile
+router.post('/me/voice-onboarding', verifyToken, async (req, res) => {
+  if (req.user.rol !== 'PROVEEDOR') return res.status(403).json({ error: 'Solo proveedores.' });
+
+  const { answers } = req.body; // { experiencia: "5 años", servicios: "limpieza y plomería", ... }
+  if (!answers || typeof answers !== 'object') {
+    return res.status(400).json({ error: 'answers (object) requerido.' });
+  }
+
+  try {
+    const profile = await prisma.providerProfile.findUnique({
+      where: { userId: req.user.id },
+      include: { user: { select: { nombre: true } } },
+    });
+    if (!profile) return res.status(404).json({ error: 'Perfil no encontrado.' });
+
+    // AI processing: extract structured data + background score
+    let extractedData = null;
+    let backgroundScore = 50; // default if no OpenAI
+    let suggestedBio    = null;
+    let flags           = [];
+
+    if (openai) {
+      const answersText = INTERVIEW_QUESTIONS
+        .filter(q => answers[q.id])
+        .map(q => `P: ${q.text}\nR: ${answers[q.id]}`)
+        .join('\n\n');
+
+      const completion = await openai.chat.completions.create({
+        model: 'gpt-4o',
+        max_tokens: 800,
+        temperature: 0.2,
+        response_format: { type: 'json_object' },
+        messages: [{
+          role: 'user',
+          content: `Analiza esta entrevista de onboarding de un proveedor de servicios del hogar colombiano. Extrae datos estructurados y evalúa el perfil.
+
+${answersText}
+
+Responde SOLO JSON:
+{
+  "servicios": [<lista de servicios mencionados, IDs: limpieza|plomeria|electricidad|pintura|jardineria|cerrajeria|mudanzas|aire_acondicionado|carpinteria|fumigacion>],
+  "ciudades": [<lista de ciudades colombianas mencionadas>],
+  "aniosExperiencia": <número entero o null>,
+  "tarifaPorHora": <número COP o null — interpreta "80 mil" como 80000>,
+  "bioGenerada": "<bio profesional de 2-3 oraciones basada en las respuestas>",
+  "referencia": { "nombre": "<nombre>", "telefono": "<teléfono>" } o null,
+  "backgroundScore": <0-100: evalúa coherencia, honestidad, experiencia, disponibilidad. Resta si admite antecedentes o responde evasivamente.>,
+  "flags": [<lista de señales de alerta si hay: "admite_antecedentes", "respuestas_evasivas", "sin_referencias", "experiencia_inconsistente">],
+  "resumenAdmin": "<resumen de 2 oraciones para el equipo de revisión>",
+  "aprobacionSugerida": "aprobado" | "en_revision" | "rechazado"
+}`,
+        }],
+      });
+
+      extractedData = JSON.parse(completion.choices[0].message.content);
+      backgroundScore = extractedData.backgroundScore ?? 50;
+      suggestedBio    = extractedData.bioGenerada;
+      flags           = extractedData.flags || [];
+    } else {
+      // Simple extraction without AI
+      extractedData = { resumenAdmin: 'Entrevista completada sin análisis IA.', aprobacionSugerida: 'en_revision' };
+    }
+
+    // Update profile with extracted data
+    const updateData = {
+      backgroundScore,
+      backgroundStatus: extractedData.aprobacionSugerida === 'aprobado' && backgroundScore >= 70 ? 'aprobado'
+        : flags.includes('admite_antecedentes') || backgroundScore < 30 ? 'rechazado'
+        : 'en_revision',
+      backgroundData: {
+        answers,
+        extractedData,
+        flags,
+        interviewedAt: new Date().toISOString(),
+      },
+      voiceOnboardingAt: new Date(),
+    };
+
+    // Only update profile fields if we got AI extraction
+    if (extractedData.servicios?.length)      updateData.servicios = extractedData.servicios;
+    if (extractedData.ciudades?.length)       updateData.ciudades  = extractedData.ciudades;
+    if (extractedData.aniosExperiencia != null) updateData.aniosExperiencia = extractedData.aniosExperiencia;
+    if (extractedData.tarifaPorHora && extractedData.tarifaPorHora > 0) updateData.tarifaPorHora = extractedData.tarifaPorHora;
+    if (suggestedBio && !profile.bio) updateData.bio = suggestedBio;
+
+    const updated = await prisma.providerProfile.update({
+      where: { id: profile.id },
+      data: updateData,
+    });
+
+    res.json({
+      mensaje: 'Entrevista procesada exitosamente',
+      backgroundScore,
+      backgroundStatus: updated.backgroundStatus,
+      flags,
+      suggestedBio,
+      resumenAdmin: extractedData.resumenAdmin,
+      profileUpdated: { servicios: updateData.servicios, ciudades: updateData.ciudades, aniosExperiencia: updateData.aniosExperiencia, tarifaPorHora: updateData.tarifaPorHora },
+    });
+  } catch (e) {
+    console.error('[voice-onboarding]', e);
+    res.status(500).json({ error: 'Error procesando la entrevista.' });
+  }
+});
+
+// GET /providers/me/background-status — returns current background check status
+router.get('/me/background-status', verifyToken, async (req, res) => {
+  if (req.user.rol !== 'PROVEEDOR') return res.status(403).json({ error: 'Solo proveedores.' });
+  try {
+    const profile = await prisma.providerProfile.findUnique({
+      where: { userId: req.user.id },
+      select: { backgroundScore: true, backgroundStatus: true, backgroundData: true, voiceOnboardingAt: true, cedulaStatus: true },
+    });
+    if (!profile) return res.status(404).json({ error: 'Perfil no encontrado.' });
+    res.json(profile);
+  } catch (e) {
+    res.status(500).json({ error: 'Error.' });
+  }
+});
+
+// GET /admin/providers/background-queue — providers pending background review
+router.get('/background-queue', verifyToken, async (req, res) => {
+  if (req.user.rol !== 'ADMIN') return res.status(403).json({ error: 'Solo admin.' });
+  try {
+    const providers = await prisma.providerProfile.findMany({
+      where: { backgroundStatus: { in: ['en_revision', 'pendiente'] }, voiceOnboardingAt: { not: null } },
+      orderBy: { voiceOnboardingAt: 'desc' },
+      include: { user: { select: { nombre: true, email: true } } },
+      take: 50,
+    });
+    res.json({ providers, total: providers.length });
+  } catch (e) {
+    res.status(500).json({ error: 'Error.' });
+  }
+});
+
 module.exports = router;

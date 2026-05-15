@@ -3,6 +3,7 @@ const verifyToken = require('../middleware/verifyToken');
 const prisma     = require('../lib/prisma');
 const email      = require('../lib/email');
 const OpenAI     = require('openai');
+const { notifyBookingNew, notifyBookingStatusChange } = require('../lib/notifications');
 
 const openai = process.env.OPENAI_API_KEY ? new OpenAI({ apiKey: process.env.OPENAI_API_KEY }) : null;
 
@@ -21,7 +22,10 @@ router.post('/', verifyToken, async (req, res) => {
       return res.status(403).json({ error: 'Solo los clientes pueden crear reservas' });
     }
 
-    const { proveedorId, tipoServicio, descripcion, fechaServicio, duracionHoras } = req.body;
+    const { proveedorId, tipoServicio, descripcion, fechaServicio, duracionHoras, recurrencia } = req.body;
+
+    const RECURRENCIAS_VALIDAS = ['UNICA', 'SEMANAL', 'QUINCENAL', 'MENSUAL'];
+    const recurrenciaFinal = recurrencia && RECURRENCIAS_VALIDAS.includes(recurrencia) ? recurrencia : 'UNICA';
 
     if (!proveedorId || !tipoServicio || !fechaServicio) {
       return res.status(400).json({ error: 'proveedorId, tipoServicio y fechaServicio son requeridos' });
@@ -49,8 +53,38 @@ router.post('/', verifyToken, async (req, res) => {
     }
 
     const horas          = parseFloat(duracionHoras) || 2;
+
+    // ── Anti-double-booking: detectar solapamiento con reservas activas ──
+    const newStart = fechaDate;
+    const newEnd   = new Date(fechaDate.getTime() + horas * 60 * 60 * 1000);
+    const ventana  = 12 * 60 * 60 * 1000; // ventana de búsqueda ±12h
+    const candidatas = await prisma.booking.findMany({
+      where: {
+        proveedorId,
+        estado: { in: ['PENDIENTE', 'CONFIRMADO', 'EN_PROGRESO'] },
+        fechaServicio: {
+          gte: new Date(newStart.getTime() - ventana),
+          lte: new Date(newEnd.getTime()   + ventana),
+        },
+      },
+      select: { fechaServicio: true, duracionHoras: true },
+    });
+    const conflict = candidatas.some(b => {
+      const bStart = new Date(b.fechaServicio);
+      const bEnd   = new Date(bStart.getTime() + b.duracionHoras * 60 * 60 * 1000);
+      return newStart < bEnd && newEnd > bStart;
+    });
+    if (conflict) {
+      return res.status(409).json({
+        error: 'El proveedor ya tiene una reserva en ese horario. Por favor elige otra fecha u hora.',
+      });
+    }
+
     const precioTotal    = proveedor.tarifaPorHora * horas;
     const comisionDutyJoy = precioTotal * parseFloat(process.env.COMMISSION_RATE || 0.15);
+
+    // ── Instant booking: si el proveedor lo activa, la reserva va directo a CONFIRMADO ──
+    const estadoInicial = proveedor.instantBooking ? 'CONFIRMADO' : 'PENDIENTE';
 
     const booking = await prisma.booking.create({
       data: {
@@ -62,6 +96,8 @@ router.post('/', verifyToken, async (req, res) => {
         duracionHoras: horas,
         precioTotal,
         comisionDutyJoy,
+        estado: estadoInicial,
+        recurrencia: recurrenciaFinal,
       },
       include: {
         proveedor: { include: { user: { select: { nombre: true, email: true } } } },
@@ -69,30 +105,52 @@ router.post('/', verifyToken, async (req, res) => {
       },
     });
 
-    // ── Emails: al proveedor + confirmación al cliente ────────────────
+    // ── Emails ─────────────────────────────────────────────────────────
     const fechaFmt = formatFecha(fechaServicio);
-    email.reservaCreada({
-      proveedorEmail:  booking.proveedor.user.email,
-      proveedorNombre: booking.proveedor.user.nombre,
-      clienteNombre:   booking.cliente.nombre,
-      tipoServicio,
-      fecha:           fechaFmt,
-      duracion:        horas,
-      precioTotal,
-      bookingId:       booking.id,
-    });
-    email.reservaCreadaCliente({
-      clienteEmail:    booking.cliente.email,
-      clienteNombre:   booking.cliente.nombre,
-      proveedorNombre: booking.proveedor.user.nombre,
-      tipoServicio,
-      fecha:           fechaFmt,
-      duracion:        horas,
-      precioTotal,
-      bookingId:       booking.id,
-    });
+    const emailBase = { tipoServicio, fecha: fechaFmt, duracion: horas, precioTotal, bookingId: booking.id };
 
-    res.status(201).json({ mensaje: 'Reserva creada exitosamente', booking });
+    if (estadoInicial === 'CONFIRMADO') {
+      // Instant booking: cliente recibe confirmación directa, proveedor recibe aviso de nueva reserva confirmada
+      email.reservaConfirmada({
+        clienteEmail:    booking.cliente.email,
+        clienteNombre:   booking.cliente.nombre,
+        proveedorNombre: booking.proveedor.user.nombre,
+        ...emailBase,
+      }).catch(() => {});
+      email.reservaCreada({
+        proveedorEmail:  booking.proveedor.user.email,
+        proveedorNombre: booking.proveedor.user.nombre,
+        clienteNombre:   booking.cliente.nombre,
+        ...emailBase,
+      }).catch(() => {});
+    } else {
+      email.reservaCreada({
+        proveedorEmail:  booking.proveedor.user.email,
+        proveedorNombre: booking.proveedor.user.nombre,
+        clienteNombre:   booking.cliente.nombre,
+        ...emailBase,
+      }).catch(() => {});
+      email.reservaCreadaCliente({
+        clienteEmail:    booking.cliente.email,
+        clienteNombre:   booking.cliente.nombre,
+        proveedorNombre: booking.proveedor.user.nombre,
+        ...emailBase,
+      }).catch(() => {});
+    }
+
+    // ── Notificación al proveedor ───────────────────────────────────────
+    notifyBookingNew({
+      booking: { ...booking, proveedorId: booking.proveedor.id },
+      clienteNombre: booking.cliente.nombre,
+    }).catch(() => {});
+
+    res.status(201).json({
+      mensaje: estadoInicial === 'CONFIRMADO'
+        ? '¡Reserva confirmada al instante! Procede con el pago para asegurarla.'
+        : 'Reserva creada exitosamente',
+      booking,
+      instantBooking: estadoInicial === 'CONFIRMADO',
+    });
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: 'Error al crear la reserva' });
@@ -235,7 +293,7 @@ router.get('/:id', verifyToken, async (req, res) => {
 // PATCH /bookings/:id/status — cambiar estado de una reserva
 router.patch('/:id/status', verifyToken, async (req, res) => {
   try {
-    const { estado } = req.body;
+    const { estado, motivoCancelacion } = req.body;
     const estadosValidos = ['PENDIENTE', 'CONFIRMADO', 'EN_PROGRESO', 'COMPLETADO', 'CANCELADO'];
 
     if (!estadosValidos.includes(estado)) {
@@ -275,9 +333,14 @@ router.patch('/:id/status', verifyToken, async (req, res) => {
       return res.status(403).json({ error: 'Transición de estado no permitida' });
     }
 
+    const updateData = { estado };
+    if (estado === 'CANCELADO' && motivoCancelacion?.trim()) {
+      updateData.motivoCancelacion = motivoCancelacion.trim().slice(0, 500);
+    }
+
     const updated = await prisma.booking.update({
       where: { id: req.params.id },
-      data: { estado },
+      data: updateData,
     });
 
     // ── Emails según nuevo estado ─────────────────────────────────────
@@ -327,6 +390,13 @@ router.patch('/:id/status', verifyToken, async (req, res) => {
       }
     }
 
+    // ── Notificación a la otra parte ─────────────────────────────────────
+    notifyBookingStatusChange({
+      booking: { ...booking, clienteId: booking.clienteId, clienteNombre: booking.cliente.nombre },
+      nuevoEstado: estado,
+      actorRol: req.user.rol,
+    }).catch(() => {});
+
     res.json({ mensaje: 'Estado actualizado', booking: updated });
   } catch (error) {
     console.error(error);
@@ -362,7 +432,17 @@ router.post('/:id/report', verifyToken, async (req, res) => {
       return res.status(403).json({ error: 'No autorizado' });
     }
 
-    // Fire-and-forget — nunca bloquea la respuesta
+    // ── Persist dispute to DB ────────────────────────────────────────────
+    const disputa = await prisma.disputa.create({
+      data: {
+        bookingId:  booking.id,
+        clienteId:  req.user.id,
+        mensaje:    mensaje.trim(),
+        estado:     'abierta',
+      },
+    });
+
+    // Fire-and-forget emails — nunca bloquean la respuesta
     email.disputaAdmin({
       bookingId:       booking.id,
       clienteNombre:   booking.cliente.nombre,
@@ -379,7 +459,7 @@ router.post('/:id/report', verifyToken, async (req, res) => {
       bookingId:     booking.id,
     }).catch(() => {});
 
-    res.json({ ok: true, mensaje: 'Reporte enviado. Te contactaremos en las próximas 24 horas hábiles.' });
+    res.json({ ok: true, disputaId: disputa.id, mensaje: 'Reporte enviado. Te contactaremos en las próximas 24 horas hábiles.' });
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: 'Error al enviar el reporte' });

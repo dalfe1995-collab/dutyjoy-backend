@@ -181,6 +181,27 @@ async function servicioCompletado({ proveedorEmail, proveedorNombre, clienteNomb
   await send({ to: proveedorEmail, subject: `Servicio completado — DutyJoy`, html });
 }
 
+/**
+ * Al proveedor cuando el pago de un cliente es confirmado por MercadoPago
+ */
+async function pagoConfirmadoProveedor({ proveedorEmail, proveedorNombre, clienteNombre, tipoServicio, fecha, precioTotal, comision }) {
+  const ganancia = precioTotal - (comision || precioTotal * 0.15);
+  const html = layout('¡Pago recibido! 💰', `
+    <p>Hola <strong>${proveedorNombre}</strong>,</p>
+    <p><strong>${clienteNombre}</strong> acaba de pagar por el servicio de <strong>${tipoServicio}</strong>. El servicio está confirmado.</p>
+    <table style="width:100%;border-collapse:collapse;margin:16px 0">
+      <tr><td style="padding:8px 0;color:#999">Fecha del servicio</td><td style="padding:8px 0;font-weight:600">${fecha}</td></tr>
+      <tr><td style="padding:8px 0;color:#999">Precio total</td><td style="padding:8px 0;font-weight:600">$${precioTotal.toLocaleString('es-CO')} COP</td></tr>
+      <tr><td style="padding:8px 0;color:#999">Comisión DutyJoy (15%)</td><td style="padding:8px 0;color:#ff6b6b">−$${(comision || precioTotal * 0.15).toLocaleString('es-CO')} COP</td></tr>
+      <tr style="border-top:1px solid #333"><td style="padding:12px 0;color:#999;font-weight:700">Tu ganancia</td><td style="padding:12px 0;font-weight:700;color:#FFC534;font-size:18px">$${ganancia.toLocaleString('es-CO')} COP</td></tr>
+    </table>
+    <p style="color:#aaa;font-size:13px">El dinero será liberado una vez que el servicio sea completado.</p>
+    <a href="${APP}/my-bookings" style="${BTN}">Ver reserva →</a>
+  `);
+
+  await send({ to: proveedorEmail, subject: `¡Pago confirmado por ${clienteNombre}! — DutyJoy`, html });
+}
+
 // ════════════════════════════════════════════════════════════════════════
 // EMAILS DE RESEÑAS
 // ════════════════════════════════════════════════════════════════════════
@@ -369,4 +390,5 @@ module.exports = {
   disputaCliente,
   reservaCreadaCliente,
   reservaCancelada,
+  pagoConfirmadoProveedor,
 };

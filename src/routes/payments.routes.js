@@ -2,6 +2,7 @@ const router      = require('express').Router();
 const { MercadoPagoConfig, Preference, Payment } = require('mercadopago');
 const verifyToken = require('../middleware/verifyToken');
 const prisma      = require('../lib/prisma');
+const email       = require('../lib/email');
 
 // Inicializar cliente MP con el access token del .env
 const mp = new MercadoPagoConfig({
@@ -51,9 +52,9 @@ router.post('/create', verifyToken, async (req, res) => {
         email: booking.cliente.email,
       },
       back_urls: {
-        success: `${process.env.FRONTEND_URL}/bookings?pago=exitoso`,
-        failure: `${process.env.FRONTEND_URL}/bookings?pago=fallido`,
-        pending: `${process.env.FRONTEND_URL}/bookings?pago=pendiente`,
+        success: `${process.env.FRONTEND_URL}/my-bookings?pago=exitoso`,
+        failure: `${process.env.FRONTEND_URL}/my-bookings?pago=fallido`,
+        pending: `${process.env.FRONTEND_URL}/my-bookings?pago=pendiente`,
       },
       auto_return:       'approved',
       external_reference: booking.id,        // Para identificar el booking en el webhook
@@ -105,11 +106,37 @@ router.post('/webhook', async (req, res) => {
 
     // Actualizar estado del booking según el estado del pago
     if (payment.status === 'approved') {
-      await prisma.booking.update({
+      const booking = await prisma.booking.update({
         where: { id: bookingId },
         data:  { estado: 'CONFIRMADO' },
+        include: {
+          cliente:  { select: { nombre: true, email: true } },
+          proveedor: { include: { user: { select: { nombre: true, email: true } } } },
+        },
       });
       console.log(`[MP Webhook] Booking ${bookingId} → CONFIRMADO`);
+
+      // Enviar email de confirmación al cliente y al proveedor
+      const fechaFmt = new Date(booking.fechaServicio).toLocaleDateString('es-CO', {
+        weekday: 'long', year: 'numeric', month: 'long', day: 'numeric', hour: '2-digit', minute: '2-digit',
+      });
+      email.reservaConfirmada({
+        clienteEmail:    booking.cliente.email,
+        clienteNombre:   booking.cliente.nombre,
+        proveedorNombre: booking.proveedor.user.nombre,
+        tipoServicio:    booking.tipoServicio,
+        fecha:           fechaFmt,
+        precioTotal:     booking.precioTotal,
+      }).catch(() => {});
+      email.pagoConfirmadoProveedor({
+        proveedorEmail:  booking.proveedor.user.email,
+        proveedorNombre: booking.proveedor.user.nombre,
+        clienteNombre:   booking.cliente.nombre,
+        tipoServicio:    booking.tipoServicio,
+        fecha:           fechaFmt,
+        precioTotal:     booking.precioTotal,
+        comision:        booking.comisionDutyJoy,
+      }).catch(() => {});
     } else if (payment.status === 'rejected' || payment.status === 'cancelled') {
       await prisma.booking.update({
         where: { id: bookingId },

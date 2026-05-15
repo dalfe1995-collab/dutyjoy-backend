@@ -83,6 +83,11 @@ model ProviderProfile {
   totalViews        Int       @default(0)     // vistas al perfil público (incrementado en GET /providers/:id)
   tasaAceptacion    Float?    // % bookings confirmados (actualizado por cron diario)
   embedding         Unsupported("vector(1536)")?  // OpenAI text-embedding-3-small
+  // ── Background check & voice onboarding ────────────────────────────────
+  backgroundScore   Int?      // 0-100 composite score from voice interview + cedula
+  backgroundData    Json?     // {references, workHistory, selfDeclaration, interviewAnswers}
+  backgroundStatus  String    @default("pendiente") // pendiente | aprobado | rechazado | en_revision
+  voiceOnboardingAt DateTime? // timestamp when voice interview was completed
   createdAt         DateTime  @default(now())
 
   bookings   Booking[]

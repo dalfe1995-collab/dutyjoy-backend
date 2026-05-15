@@ -2,17 +2,23 @@ const request = require('supertest');
 const jwt     = require('jsonwebtoken');
 const app     = require('../src/app');
 
-jest.mock('../src/lib/email', () => ({
-  bienvenida:        jest.fn(),
-  reservaCreada:     jest.fn(),
-  reservaConfirmada: jest.fn(),
-  recordatorio24h:   jest.fn(),
-  servicioCompletado: jest.fn(),
-  nuevaResena:       jest.fn(),
-  resetPassword:     jest.fn(),
-  disputaAdmin:      jest.fn().mockResolvedValue(undefined),
-  disputaCliente:    jest.fn().mockResolvedValue(undefined),
-}));
+jest.mock('../src/lib/email', () => {
+  const fn = () => jest.fn().mockResolvedValue(undefined);
+  return {
+    bienvenida:              fn(),
+    reservaCreada:           fn(),
+    reservaConfirmada:       fn(),
+    recordatorio24h:         fn(),
+    servicioCompletado:      fn(),
+    nuevaResena:             fn(),
+    resetPassword:           fn(),
+    disputaAdmin:            fn(),
+    disputaCliente:          fn(),
+    reservaCreadaCliente:    fn(),
+    reservaCancelada:        fn(),
+    pagoConfirmadoProveedor: fn(),
+  };
+});
 
 jest.mock('../src/lib/prisma', () => ({
   booking: {
@@ -23,6 +29,9 @@ jest.mock('../src/lib/prisma', () => ({
   },
   providerProfile: {
     findUnique: jest.fn(),
+  },
+  disputa: {
+    create: jest.fn().mockResolvedValue({ id: 'disputa-001', estado: 'abierta' }),
   },
 }));
 
@@ -57,7 +66,7 @@ const reservaBase = {
   proveedorId:    'profile-proveedor-001',
   tipoServicio:   'plomeria',
   descripcion:    'Reparar tubería',
-  fechaServicio:  new Date('2026-05-01T09:00:00').toISOString(),
+  fechaServicio:  new Date('2027-12-01T09:00:00').toISOString(),
   duracionHoras:  2,
   precioTotal:    100000,
   comisionDutyJoy: 15000,
@@ -75,6 +84,11 @@ beforeEach(() => jest.clearAllMocks());
 describe('POST /bookings — crear reserva', () => {
 // ============================================================
 
+  // Default: no conflicting bookings for overlap check
+  beforeEach(() => {
+    prisma.booking.findMany.mockResolvedValue([]);
+  });
+
   it('cliente crea reserva exitosamente', async () => {
     prisma.providerProfile.findUnique.mockResolvedValue(perfilProveedor);
     prisma.booking.create.mockResolvedValue(reservaBase);
@@ -86,7 +100,7 @@ describe('POST /bookings — crear reserva', () => {
         proveedorId:   'profile-proveedor-001',
         tipoServicio:  'plomeria',
         descripcion:   'Reparar tubería',
-        fechaServicio: '2026-05-01T09:00:00',
+        fechaServicio: '2027-12-01T09:00:00',
         duracionHoras: 2,
       });
 
@@ -105,7 +119,7 @@ describe('POST /bookings — crear reserva', () => {
       .send({
         proveedorId:   'profile-proveedor-001',
         tipoServicio:  'plomeria',
-        fechaServicio: '2026-05-01T09:00:00',
+        fechaServicio: '2027-12-01T09:00:00',
         duracionHoras: 3,
       });
 
@@ -122,7 +136,7 @@ describe('POST /bookings — crear reserva', () => {
     const res = await request(app)
       .post('/bookings')
       .set('Authorization', `Bearer ${tokenProveedor()}`)
-      .send({ proveedorId: 'x', tipoServicio: 'plomeria', fechaServicio: '2026-05-01' });
+      .send({ proveedorId: 'x', tipoServicio: 'plomeria', fechaServicio: '2027-12-01' });
 
     expect(res.statusCode).toBe(403);
     expect(res.body.error).toMatch(/clientes/);
@@ -134,7 +148,7 @@ describe('POST /bookings — crear reserva', () => {
     const res = await request(app)
       .post('/bookings')
       .set('Authorization', `Bearer ${tokenCliente()}`)
-      .send({ proveedorId: 'no-existe', tipoServicio: 'plomeria', fechaServicio: '2026-05-01' });
+      .send({ proveedorId: 'no-existe', tipoServicio: 'plomeria', fechaServicio: '2027-12-01' });
 
     expect(res.statusCode).toBe(404);
     expect(res.body.error).toMatch(/Proveedor no encontrado/);
@@ -179,7 +193,7 @@ describe('POST /bookings — crear reserva', () => {
       .send({
         proveedorId:   'profile-proveedor-001',
         tipoServicio:  'plomeria',
-        fechaServicio: '2026-05-01T09:00:00',
+        fechaServicio: '2027-12-01T09:00:00',
         duracionHoras: 2,
       });
 
@@ -196,12 +210,52 @@ describe('POST /bookings — crear reserva', () => {
       .send({
         proveedorId:   'profile-proveedor-001',
         tipoServicio:  'jardineria', // no está en servicios del proveedor
-        fechaServicio: '2026-05-01T09:00:00',
+        fechaServicio: '2027-12-01T09:00:00',
         duracionHoras: 2,
       });
 
     expect(res.statusCode).toBe(400);
     expect(res.body.error).toMatch(/jardineria/);
+  });
+
+  it('rechaza reserva con horario en conflicto (409)', async () => {
+    prisma.providerProfile.findUnique.mockResolvedValue(perfilProveedor);
+    // Simulate an existing booking overlapping 2027-12-01 09:00–11:00
+    prisma.booking.findMany.mockResolvedValue([{
+      fechaServicio: new Date('2027-12-01T08:00:00'),
+      duracionHoras: 3, // ends at 11:00 → overlaps with 09:00
+    }]);
+
+    const res = await request(app)
+      .post('/bookings')
+      .set('Authorization', `Bearer ${tokenCliente()}`)
+      .send({
+        proveedorId:   'profile-proveedor-001',
+        tipoServicio:  'plomeria',
+        fechaServicio: '2027-12-01T09:00:00',
+        duracionHoras: 2,
+      });
+
+    expect(res.statusCode).toBe(409);
+    expect(res.body.error).toMatch(/horario/);
+  });
+
+  it('instant booking crea reserva en estado CONFIRMADO', async () => {
+    prisma.providerProfile.findUnique.mockResolvedValue({ ...perfilProveedor, instantBooking: true });
+    prisma.booking.create.mockResolvedValue({ ...reservaBase, estado: 'CONFIRMADO' });
+
+    const res = await request(app)
+      .post('/bookings')
+      .set('Authorization', `Bearer ${tokenCliente()}`)
+      .send({
+        proveedorId:   'profile-proveedor-001',
+        tipoServicio:  'plomeria',
+        fechaServicio: '2027-12-01T09:00:00',
+        duracionHoras: 2,
+      });
+
+    expect(res.statusCode).toBe(201);
+    expect(res.body.instantBooking).toBe(true);
   });
 });
 
