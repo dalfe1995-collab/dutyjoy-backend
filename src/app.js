@@ -46,12 +46,14 @@ app.use('/auth/register',            authLimiter);
 app.use('/auth/forgot-password',     authLimiter);
 app.use('/auth/reset-password',      authLimiter);
 app.use('/auth/resend-verification', authLimiter);
-app.use('/bookings',  apiLimiter);
-app.use('/providers', apiLimiter);
-app.use('/reviews',   apiLimiter);
-app.use('/payments',  apiLimiter);
-app.use('/admin',     apiLimiter);
-app.use('/favorites', apiLimiter);
+app.use('/bookings',      apiLimiter);
+app.use('/providers',     apiLimiter);
+app.use('/reviews',       apiLimiter);
+app.use('/payments',      apiLimiter);
+app.use('/admin',         apiLimiter);
+app.use('/favorites',     apiLimiter);
+app.use('/notifications', apiLimiter);
+app.use('/messages',      apiLimiter);
 
 // Chat: límite más estricto para controlar costos de OpenAI (30 req/min por IP)
 const chatLimiter = rateLimit({
@@ -70,15 +72,18 @@ if (process.env.NODE_ENV !== 'test') {
 app.use(express.json({ limit: '10kb' }));
 
 // ── Rutas ─────────────────────────────────────────────────────────────────
-app.use('/auth',      require('./routes/auth.routes'));
-app.use('/providers', require('./routes/providers.routes'));
-app.use('/services',  require('./routes/services.routes'));
-app.use('/bookings',  require('./routes/bookings.routes'));
-app.use('/reviews',   require('./routes/reviews.routes'));
-app.use('/payments',  require('./routes/payments.routes'));
-app.use('/admin',     require('./routes/admin.routes'));
-app.use('/chat',      require('./routes/chat.routes'));
-app.use('/favorites', require('./routes/favorites.routes'));
+app.use('/auth',          require('./routes/auth.routes'));
+app.use('/providers',     require('./routes/providers.routes'));
+app.use('/services',      require('./routes/services.routes'));
+app.use('/bookings',      require('./routes/bookings.routes'));
+app.use('/reviews',       require('./routes/reviews.routes'));
+app.use('/payments',      require('./routes/payments.routes'));
+app.use('/admin',         require('./routes/admin.routes'));
+app.use('/chat',          require('./routes/chat.routes'));
+app.use('/favorites',     require('./routes/favorites.routes'));
+app.use('/notifications', require('./routes/notifications.routes'));
+app.use('/messages',      require('./routes/messages.routes'));
+app.use('/marketing',     require('./routes/marketing.routes'));
 
 // ── Public stats (landing page) ───────────────────────────────────────────
 const prisma = require('./lib/prisma');
@@ -111,11 +116,23 @@ app.get('/sitemap.xml', async (req, res) => {
       select: { id: true, updatedAt: true },
     });
 
+    const CIUDADES_SLUG = { 'Bogotá':'bogota','Medellín':'medellin','Cali':'cali','Ibagué':'ibague','Barranquilla':'barranquilla','Cartagena':'cartagena','Bucaramanga':'bucaramanga','Pereira':'pereira' };
+    const SERVICIOS_SLUG = ['limpieza','plomeria','electricidad','pintura','jardineria','cerrajeria','mudanzas','aire_acondicionado','carpinteria','fumigacion'];
     const staticPages = [
       { path: '/', priority: '1.0', freq: 'daily' },
       { path: '/providers', priority: '0.9', freq: 'hourly' },
+      { path: '/como-funciona', priority: '0.8', freq: 'weekly' },
+      { path: '/planes', priority: '0.7', freq: 'weekly' },
+      { path: '/historias', priority: '0.6', freq: 'weekly' },
+      { path: '/cobertura', priority: '0.6', freq: 'weekly' },
+      { path: '/proveedor-registro', priority: '0.8', freq: 'weekly' },
+      { path: '/ayuda', priority: '0.6', freq: 'weekly' },
       { path: '/terms', priority: '0.3', freq: 'monthly' },
       { path: '/privacy', priority: '0.3', freq: 'monthly' },
+      // SEO service+city pages
+      ...Object.entries(CIUDADES_SLUG).flatMap(([ciudad, slug]) =>
+        SERVICIOS_SLUG.map(s => ({ path: `/servicios/${s}/${slug}`, priority: '0.8', freq: 'weekly' }))
+      ),
     ];
 
     let xml = `<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">`;
