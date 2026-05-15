@@ -152,7 +152,7 @@ router.post('/:id/suggest-response', verifyToken, async (req, res) => {
     if (!review) return res.status(404).json({ error: 'Reseña no encontrada' });
     if (review.proveedorId !== profile.id) return res.status(403).json({ error: 'No autorizado' });
 
-    const { OpenAI } = require('openai');
+    const OpenAI = require('openai');
     const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
     const completion = await openai.chat.completions.create({

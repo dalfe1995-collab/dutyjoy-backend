@@ -1,5 +1,4 @@
 const OpenAI  = require('openai');
-const { send, layout, BTN, APP } = require('./emailInternal');
 
 const openai = process.env.OPENAI_API_KEY ? new OpenAI({ apiKey: process.env.OPENAI_API_KEY }) : null;
 
