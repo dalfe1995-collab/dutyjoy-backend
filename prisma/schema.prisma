@@ -31,6 +31,25 @@ model User {
   bookingsComoCliente   Booking[] @relation("ClienteBookings")
   reviewsEscritas       Review[]  @relation("ClienteReviews")
   favoritos             Favorito[] @relation("ClienteFavoritos")
+  notificaciones        Notificacion[]
+  disputas              Disputa[]
+  mensajesEnviados      MensajeChat[] @relation("MensajesEnviados")
+  tagAsignaciones       CrmTagAsignacion[]
+}
+
+model Notificacion {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tipo      String   // booking_status | booking_new | review_new | pago_recibido | recurrencia_creada
+  titulo    String
+  mensaje   String
+  leida     Boolean  @default(false)
+  data      Json?    // { bookingId, estado, proveedorNombre, clienteNombre, etc. }
+  createdAt DateTime @default(now())
+
+  @@index([userId, leida])
+  @@index([userId, createdAt(sort: Desc)])
 }
 
 enum Rol {
@@ -51,11 +70,19 @@ model ProviderProfile {
   totalReviews  Int      @default(0)
   verificado    Boolean  @default(false)
   disponible    Boolean  @default(true)
-  aniosExperiencia Int?     // años de experiencia declarados
-  cedulaUrl     String?
-  cedulaStatus  String   @default("sin_enviar") // sin_enviar | pendiente | aprobado | rechazado
-  cedulaNota    String?  // razón de rechazo (opcional)
-  createdAt     DateTime @default(now())
+  aniosExperiencia  Int?      // años de experiencia declarados
+  cedulaUrl         String?
+  cedulaStatus      String    @default("sin_enviar") // sin_enviar | pendiente | aprobado | rechazado
+  cedulaNota        String?   // razón de rechazo (opcional)
+  // ── Nuevas features avanzadas ──────────────────────────────────────────
+  horario           Json?     // {"lun":{"activo":true,"inicio":"08:00","fin":"18:00"},...}
+  portfolioUrls     String[]  // URLs de fotos de trabajos realizados
+  instantBooking    Boolean   @default(false) // salta PENDIENTE → CONFIRMADO automáticamente
+  reservasCompletadas Int     @default(0)     // contador desnormalizado de COMPLETADO
+  tiempoRespuestaH  Float?    // promedio de horas hasta confirmar (actualizado por cron)
+  totalViews        Int       @default(0)     // vistas al perfil público (incrementado en GET /providers/:id)
+  tasaAceptacion    Float?    // % bookings confirmados (actualizado por cron diario)
+  createdAt         DateTime  @default(now())
 
   bookings   Booking[]
   reviews    Review[]
@@ -75,10 +102,24 @@ model Booking {
   precioTotal     Float
   comisionDutyJoy Float
   estado          EstadoBooking   @default(PENDIENTE)
+  recurrencia     Recurrencia     @default(UNICA)     // frecuencia de repetición
+  bookingPadreId  String?         // apunta al booking original (null si es el original)
+  bookingPadre    Booking?        @relation("RecurrenciaBookings", fields: [bookingPadreId], references: [id])
+  bookingsHijos   Booking[]       @relation("RecurrenciaBookings")
+  motivoCancelacion String?       // razón de cancelación (opcional)
   createdAt       DateTime        @default(now())
   updatedAt       DateTime        @updatedAt
 
-  review Review?
+  review    Review?
+  disputas  Disputa[]
+  mensajes  MensajeChat[]
+}
+
+enum Recurrencia {
+  UNICA
+  SEMANAL
+  QUINCENAL
+  MENSUAL
 }
 
 enum EstadoBooking {
@@ -97,9 +138,47 @@ model Review {
   cliente      User            @relation("ClienteReviews", fields: [clienteId], references: [id])
   proveedorId  String
   proveedor    ProviderProfile @relation(fields: [proveedorId], references: [id])
-  calificacion Int             // 1 a 5
-  comentario   String?
-  createdAt    DateTime        @default(now())
+  calificacion        Int      // 1 a 5
+  comentario          String?
+  respuestaProveedor  String?  // respuesta pública del proveedor a la reseña
+  createdAt           DateTime @default(now())
+}
+
+model Disputa {
+  id              String   @id @default(cuid())
+  bookingId       String
+  booking         Booking  @relation(fields: [bookingId], references: [id])
+  clienteId       String
+  cliente         User     @relation(fields: [clienteId], references: [id])
+  mensaje         String
+  estado          String   @default("abierta")  // abierta | en_revision | resuelta | cerrada
+  resolucion      String?  // nota de resolución por el admin
+  resueltaPorId   String?  // userId del admin que resolvió
+  // ── AI auto-resolution ──────────────────────────────────────────────────
+  aiVeredicto     String?  // favor_cliente | favor_proveedor | compromiso
+  aiConfianza     Float?   // 0.0 – 1.0
+  aiRazonamiento  String?  // explicación del modelo
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([estado])
+  @@index([bookingId])
+  @@index([clienteId])
+}
+
+model MensajeChat {
+  id          String   @id @default(cuid())
+  bookingId   String
+  booking     Booking  @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  autorId     String
+  autor       User     @relation("MensajesEnviados", fields: [autorId], references: [id])
+  contenido   String
+  leido       Boolean  @default(false)
+  tipo        String   @default("texto") // texto | imagen | sistema
+  createdAt   DateTime @default(now())
+
+  @@index([bookingId, createdAt(sort: Asc)])
+  @@index([autorId])
 }
 
 model Favorito {
@@ -111,4 +190,29 @@ model Favorito {
   createdAt   DateTime        @default(now())
 
   @@unique([clienteId, proveedorId])
+}
+
+// ── CRM Tags ──────────────────────────────────────────────────────────────
+model CrmTag {
+  id          String   @id @default(cuid())
+  nombre      String   @unique
+  color       String   @default("#0ABFBC")
+  descripcion String?
+  createdAt   DateTime @default(now())
+
+  asignaciones CrmTagAsignacion[]
+}
+
+model CrmTagAsignacion {
+  id          String   @id @default(cuid())
+  tagId       String
+  tag         CrmTag   @relation(fields: [tagId], references: [id], onDelete: Cascade)
+  userId      String
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  asignadoPor String   // admin userId
+  createdAt   DateTime @default(now())
+
+  @@unique([tagId, userId])
+  @@index([userId])
+  @@index([tagId])
 }
