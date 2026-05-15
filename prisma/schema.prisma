@@ -82,6 +82,7 @@ model ProviderProfile {
   tiempoRespuestaH  Float?    // promedio de horas hasta confirmar (actualizado por cron)
   totalViews        Int       @default(0)     // vistas al perfil público (incrementado en GET /providers/:id)
   tasaAceptacion    Float?    // % bookings confirmados (actualizado por cron diario)
+  embedding         Unsupported("vector(1536)")?  // OpenAI text-embedding-3-small
   createdAt         DateTime  @default(now())
 
   bookings   Booking[]

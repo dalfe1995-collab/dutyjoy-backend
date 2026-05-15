@@ -464,6 +464,175 @@ router.get('/me/profile-score', verifyToken, async (req, res) => {
   res.json({ score, tips, checks: Object.fromEntries(Object.entries(checks).map(([k, v]) => [k, v.ok])) });
 });
 
+// POST /providers/smart-match — AI-powered provider matching (semantic + 8-factor scoring)
+router.post('/smart-match', verifyToken, async (req, res) => {
+  try {
+    const {
+      query        = '',
+      category     = '',
+      budget       = 200000,   // max COP/h
+      minRating    = 0,
+      urgente      = false,
+      soloVerificados  = false,
+      soloDisponibles  = false,
+      ciudad       = '',
+      limit        = 10,
+    } = req.body;
+
+    const take = Math.min(parseInt(limit) || 10, 30);
+
+    // 1. Build DB filters
+    const where = {
+      disponible: soloDisponibles ? true : undefined,
+      verificado: soloVerificados ? true : undefined,
+      tarifaPorHora: budget > 0 ? { lte: budget } : undefined,
+      calificacion: minRating > 0 ? { gte: parseFloat(minRating) } : undefined,
+      ...(category && { servicios: { has: category } }),
+      ...(ciudad && { ciudades: { has: ciudad } }),
+    };
+    // Remove undefined keys
+    Object.keys(where).forEach(k => where[k] === undefined && delete where[k]);
+
+    // 2. If query text → try semantic search first
+    let semanticMap = {};
+    if (query && query.trim().length > 2) {
+      const matches = await semanticSearch(query.trim(), 50);
+      matches.forEach(m => { semanticMap[m.id] = m.similarity; });
+      if (matches.length > 0) {
+        where.id = { in: matches.map(m => m.id) };
+      }
+    }
+
+    // 3. Fetch providers from DB
+    const providers = await prisma.providerProfile.findMany({
+      where,
+      take: take * 4, // fetch more to score and sort
+      include: {
+        user: { select: { nombre: true, ciudad: true } },
+      },
+    });
+
+    // 4. Load client booking history for history bonus
+    let historyIds = new Set();
+    try {
+      const history = await prisma.booking.findMany({
+        where: { clienteId: req.user.id, estado: 'COMPLETADO' },
+        select: { proveedorId: true },
+        take: 20,
+      });
+      history.forEach(b => historyIds.add(b.proveedorId));
+    } catch { /* no history */ }
+
+    // 5. 8-factor scoring (mirrors frontend computeScore)
+    const CATEGORY_MAP = {
+      aseo: ['aseo','limpieza','hogar'], plomeria: ['plomeria','tubería','agua','fontaneria'],
+      electricidad: ['electricidad','eléctrico','instalación'], jardineria: ['jardineria','jardín','plantas','poda'],
+      pintura: ['pintura','decoración'], aires: ['aire_acondicionado','a/c','refrigeración'],
+      mudanza: ['mudanzas','transporte','carga'], cerrajeria: ['cerrajeria','llaves','puertas'],
+    };
+
+    const scored = providers.map(p => {
+      let score = 0;
+      const reasons = [], penalties = [];
+      const tags = (p.servicios || []).map(s => s.toLowerCase());
+
+      // 1. Rating (0-28)
+      const ratingNorm = Math.max(0, (p.calificacion - 3) / 2);
+      score += Math.round(ratingNorm * 28);
+      if (p.calificacion >= 4.8) reasons.push(`Calificación excepcional: ${p.calificacion} ⭐`);
+      else if (p.calificacion >= 4.5) reasons.push(`Muy bien calificado: ${p.calificacion} ⭐`);
+
+      // 2. Category match (0-22)
+      if (category) {
+        const catTags = CATEGORY_MAP[category] || [category];
+        const catMatch = tags.some(t => catTags.some(ct => t.includes(ct)));
+        if (catMatch) { score += 22; reasons.push(`Especialista en ${category}`); }
+        else { score -= 5; penalties.push('Categoría diferente'); }
+      } else { score += 11; }
+
+      // 3. Budget (0-20)
+      const maxBudget = budget;
+      if (p.tarifaPorHora <= maxBudget) {
+        const saving = ((maxBudget - p.tarifaPorHora) / maxBudget) * 100;
+        score += Math.round(Math.min(20, 10 + saving * 0.2));
+        if (saving >= 30) reasons.push(`Precio ${Math.round(saving)}% bajo tu presupuesto`);
+        else reasons.push(`Dentro de tu presupuesto`);
+      } else {
+        const over = Math.round(((p.tarifaPorHora - maxBudget) / maxBudget) * 100);
+        score -= Math.min(15, over * 0.3);
+        penalties.push(`${over}% sobre tu presupuesto`);
+      }
+
+      // 4. Availability (0-15)
+      if (p.disponible) { score += 15; reasons.push('Disponible ahora mismo'); }
+      else { score -= 5; penalties.push('No disponible'); }
+
+      // 5. Response time (0-10)
+      const respH = p.tiempoRespuestaH || 24;
+      if (respH <= 1) { score += 10; reasons.push('Responde en < 1 hora'); }
+      else if (respH <= 3) { score += 6; }
+      else if (urgente) { score -= 5; penalties.push(`Tiempo de respuesta: ${respH.toFixed(0)}h`); }
+      else { score += 2; }
+
+      // 6. Verification (0-5)
+      if (p.verificado) { score += 5; reasons.push('Proveedor verificado'); }
+
+      // 7. History bonus (0-5)
+      if (historyIds.has(p.id)) { score += 5; reasons.push('Ya contratado con éxito'); }
+
+      // 8. Experience (0-5)
+      const exp = p.aniosExperiencia || 0;
+      if (exp >= 8) { score += 5; reasons.push(`${exp} años de experiencia`); }
+      else if (exp >= 4) { score += 3; }
+
+      // Semantic similarity bonus (0-10 extra)
+      const sim = semanticMap[p.id];
+      if (sim !== undefined) {
+        const bonus = Math.round(sim * 10);
+        score += bonus;
+        if (sim > 0.85) reasons.push('Alta compatibilidad semántica con tu búsqueda');
+      }
+
+      const finalScore = Math.max(5, Math.min(100, Math.round(score)));
+      return {
+        id:              p.id,
+        nombre:          p.user?.nombre || 'Proveedor',
+        ciudad:          p.user?.ciudad || p.ciudades?.[0] || '',
+        calificacion:    p.calificacion,
+        tarifaHora:      p.tarifaPorHora,
+        serviciosCount:  p.reservasCompletadas || 0,
+        tiempoRespH:     p.tiempoRespuestaH || null,
+        verificado:      p.verificado,
+        disponible:      p.disponible,
+        servicios:       p.servicios || [],
+        aniosExperiencia: p.aniosExperiencia || 0,
+        bio:             p.bio ? p.bio.substring(0, 120) : null,
+        instantBooking:  p.instantBooking || false,
+        totalReviews:    p.totalReviews || 0,
+        score:           finalScore,
+        reasons:         reasons.slice(0, 3),
+        penalties:       penalties.slice(0, 2),
+        semanticSim:     sim || null,
+      };
+    });
+
+    // 6. Sort by score desc, take top N
+    scored.sort((a, b) => b.score - a.score);
+    const top = scored.slice(0, take);
+
+    res.json({
+      results:     top,
+      total:       scored.length,
+      semantic:    Object.keys(semanticMap).length > 0,
+      query:       query || null,
+      filtersApplied: { category, budget, minRating, urgente, soloVerificados, soloDisponibles, ciudad },
+    });
+  } catch (error) {
+    console.error('[smart-match]', error);
+    res.status(500).json({ error: 'Error en Smart Match.' });
+  }
+});
+
 // GET /providers/me/pricing-suggestion — AI-powered dynamic pricing recommendation
 router.get('/me/pricing-suggestion', verifyToken, async (req, res) => {
   if (req.user.rol !== 'PROVEEDOR') {
