@@ -35,6 +35,7 @@ model User {
   disputas              Disputa[]
   mensajesEnviados      MensajeChat[] @relation("MensajesEnviados")
   tagAsignaciones       CrmTagAsignacion[]
+  pushSubscriptions     PushSubscription[]
 }
 
 model Notificacion {
@@ -88,6 +89,8 @@ model ProviderProfile {
   backgroundData    Json?     // {references, workHistory, selfDeclaration, interviewAnswers}
   backgroundStatus  String    @default("pendiente") // pendiente | aprobado | rechazado | en_revision
   voiceOnboardingAt DateTime? // timestamp when voice interview was completed
+  // ── Service packages ─────────────────────────────────────────────────────
+  paquetes          Json?     // [{id,nombre,descripcion,precio,duracionHoras,incluye}]
   createdAt         DateTime  @default(now())
 
   bookings   Booking[]
@@ -113,6 +116,7 @@ model Booking {
   bookingPadre    Booking?        @relation("RecurrenciaBookings", fields: [bookingPadreId], references: [id])
   bookingsHijos   Booking[]       @relation("RecurrenciaBookings")
   motivoCancelacion String?       // razón de cancelación (opcional)
+  fotos           String[]        // post-job photo URLs/base64 uploaded by provider
   createdAt       DateTime        @default(now())
   updatedAt       DateTime        @updatedAt
 
@@ -226,4 +230,17 @@ model CrmTagAsignacion {
   @@unique([tagId, userId])
   @@index([userId])
   @@index([tagId])
+}
+
+// ── Web Push Subscriptions ────────────────────────────────────────────────
+model PushSubscription {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  endpoint  String   @unique
+  p256dh    String
+  auth      String
+  createdAt DateTime @default(now())
+
+  @@index([userId])
 }

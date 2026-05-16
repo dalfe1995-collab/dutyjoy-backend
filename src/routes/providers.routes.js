@@ -1418,4 +1418,66 @@ router.get('/background-queue', verifyToken, async (req, res) => {
   }
 });
 
+/* ══════════════════════════════════════════════════════════════════════
+   Service Packages CRUD
+   paquetes: [{id,nombre,descripcion,precio,duracionHoras,incluye:[]}]
+   ══════════════════════════════════════════════════════════════════════ */
+const { randomUUID } = require('crypto');
+
+// GET /providers/me/packages
+router.get('/me/packages', verifyToken, async (req, res) => {
+  try {
+    if (req.user.rol !== 'PROVEEDOR') return res.status(403).json({ error: 'Solo proveedores' });
+    const p = await prisma.providerProfile.findUnique({ where: { userId: req.user.id }, select: { paquetes: true } });
+    res.json(p?.paquetes || []);
+  } catch (e) { res.status(500).json({ error: 'Error' }); }
+});
+
+// POST /providers/me/packages
+router.post('/me/packages', verifyToken, async (req, res) => {
+  try {
+    if (req.user.rol !== 'PROVEEDOR') return res.status(403).json({ error: 'Solo proveedores' });
+    const { nombre, descripcion, precio, duracionHoras, incluye = [] } = req.body;
+    if (!nombre?.trim() || !precio || !duracionHoras) {
+      return res.status(400).json({ error: 'nombre, precio y duracionHoras son requeridos' });
+    }
+    const p = await prisma.providerProfile.findUnique({ where: { userId: req.user.id }, select: { paquetes: true } });
+    const existing = Array.isArray(p?.paquetes) ? p.paquetes : [];
+    if (existing.length >= 6) return res.status(400).json({ error: 'Máximo 6 paquetes' });
+    const newPkg = { id: randomUUID(), nombre: nombre.trim(), descripcion: descripcion?.trim() || '', precio: parseFloat(precio), duracionHoras: parseFloat(duracionHoras), incluye };
+    const updated = await prisma.providerProfile.update({
+      where: { userId: req.user.id },
+      data: { paquetes: [...existing, newPkg] },
+    });
+    res.status(201).json(newPkg);
+  } catch (e) { console.error(e); res.status(500).json({ error: 'Error' }); }
+});
+
+// PUT /providers/me/packages/:pkgId
+router.put('/me/packages/:pkgId', verifyToken, async (req, res) => {
+  try {
+    if (req.user.rol !== 'PROVEEDOR') return res.status(403).json({ error: 'Solo proveedores' });
+    const p = await prisma.providerProfile.findUnique({ where: { userId: req.user.id }, select: { paquetes: true } });
+    const list = Array.isArray(p?.paquetes) ? p.paquetes : [];
+    const idx = list.findIndex(pkg => pkg.id === req.params.pkgId);
+    if (idx === -1) return res.status(404).json({ error: 'Paquete no encontrado' });
+    const { nombre, descripcion, precio, duracionHoras, incluye } = req.body;
+    list[idx] = { ...list[idx], ...(nombre && { nombre: nombre.trim() }), ...(descripcion !== undefined && { descripcion: descripcion.trim() }), ...(precio && { precio: parseFloat(precio) }), ...(duracionHoras && { duracionHoras: parseFloat(duracionHoras) }), ...(incluye && { incluye }) };
+    await prisma.providerProfile.update({ where: { userId: req.user.id }, data: { paquetes: list } });
+    res.json(list[idx]);
+  } catch (e) { res.status(500).json({ error: 'Error' }); }
+});
+
+// DELETE /providers/me/packages/:pkgId
+router.delete('/me/packages/:pkgId', verifyToken, async (req, res) => {
+  try {
+    if (req.user.rol !== 'PROVEEDOR') return res.status(403).json({ error: 'Solo proveedores' });
+    const p = await prisma.providerProfile.findUnique({ where: { userId: req.user.id }, select: { paquetes: true } });
+    const list = Array.isArray(p?.paquetes) ? p.paquetes : [];
+    const filtered = list.filter(pkg => pkg.id !== req.params.pkgId);
+    await prisma.providerProfile.update({ where: { userId: req.user.id }, data: { paquetes: filtered } });
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: 'Error' }); }
+});
+
 module.exports = router;

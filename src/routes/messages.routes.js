@@ -1,6 +1,7 @@
 const router      = require('express').Router();
 const verifyToken = require('../middleware/verifyToken');
 const prisma      = require('../lib/prisma');
+const { sendPush } = require('../lib/push');
 
 /* ── Contact-info detection ─────────────────────────────────────────────────
    Detects Colombian phone numbers, WhatsApp links, emails, Telegram, etc.
@@ -160,15 +161,24 @@ router.post('/:bookingId', verifyToken, async (req, res) => {
       : booking.clienteId;
 
     const previewText = msgTipo === 'imagen' ? '📷 Imagen' : contenido.trim().substring(0, 80);
-    await prisma.notificacion.create({
-      data: {
-        userId:  recipientId,
-        tipo:    'mensaje_nuevo',
-        titulo:  '💬 Nuevo mensaje',
-        mensaje: `${req.user.nombre}: "${previewText}${contenido.trim().length > 80 ? '…' : ''}"`,
-        data:    { bookingId: booking.id, autorId: req.user.id },
-      },
-    }).catch(() => {});
+    const notifMsg = `${req.user.nombre}: "${previewText}${contenido.trim().length > 80 ? '…' : ''}"`;
+    await Promise.allSettled([
+      prisma.notificacion.create({
+        data: {
+          userId:  recipientId,
+          tipo:    'mensaje_nuevo',
+          titulo:  '💬 Nuevo mensaje',
+          mensaje: notifMsg,
+          data:    { bookingId: booking.id, autorId: req.user.id },
+        },
+      }),
+      sendPush(recipientId, {
+        title: '💬 Nuevo mensaje',
+        body:  notifMsg,
+        url:   `/booking-chat/${booking.id}`,
+        tag:   `chat-${booking.id}`,
+      }),
+    ]);
 
     res.status(201).json({ mensaje, warnMsg, contactDetected });
   } catch (e) {

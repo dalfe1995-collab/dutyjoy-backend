@@ -84,6 +84,7 @@ app.use('/favorites',     require('./routes/favorites.routes'));
 app.use('/notifications', require('./routes/notifications.routes'));
 app.use('/messages',      require('./routes/messages.routes'));
 app.use('/marketing',     require('./routes/marketing.routes'));
+app.use('/push',          require('./routes/push.routes'));
 
 // ── Public stats (landing page) ───────────────────────────────────────────
 const prisma = require('./lib/prisma');

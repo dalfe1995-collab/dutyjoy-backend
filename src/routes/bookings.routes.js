@@ -1,9 +1,11 @@
 const router     = require('express').Router();
+const express    = require('express');
 const verifyToken = require('../middleware/verifyToken');
 const prisma     = require('../lib/prisma');
 const email      = require('../lib/email');
 const OpenAI     = require('openai');
 const { notifyBookingNew, notifyBookingStatusChange } = require('../lib/notifications');
+const { sendPush } = require('../lib/push');
 
 const openai = process.env.OPENAI_API_KEY ? new OpenAI({ apiKey: process.env.OPENAI_API_KEY }) : null;
 
@@ -512,5 +514,58 @@ Extrae campos de reserva del texto del usuario. Responde SOLO con JSON válido (
     res.status(500).json({ error: 'Error al procesar la solicitud' });
   }
 });
+
+/* ── POST /bookings/:id/photos — proveedor sube fotos antes/después ─── */
+router.post('/:id/photos',
+  verifyToken,
+  express.json({ limit: '10mb' }), // override for photos
+  async (req, res) => {
+    try {
+      const booking = await prisma.booking.findUnique({
+        where: { id: req.params.id },
+        include: { proveedor: { select: { userId: true } }, cliente: { select: { nombre: true, email: true } } },
+      });
+      if (!booking) return res.status(404).json({ error: 'Reserva no encontrada' });
+      if (booking.proveedor.userId !== req.user.id) {
+        return res.status(403).json({ error: 'Solo el proveedor puede subir fotos' });
+      }
+      if (!['EN_PROGRESO', 'COMPLETADO'].includes(booking.estado)) {
+        return res.status(400).json({ error: 'Solo se pueden subir fotos en reservas en progreso o completadas' });
+      }
+
+      const { fotos } = req.body;
+      if (!Array.isArray(fotos) || fotos.length === 0) {
+        return res.status(400).json({ error: 'Se requiere al menos una foto' });
+      }
+      if (fotos.length > 8) return res.status(400).json({ error: 'Máximo 8 fotos por reserva' });
+
+      // Validate each is a base64 image under 1.5MB
+      for (const f of fotos) {
+        if (typeof f !== 'string' || !f.startsWith('data:image/')) {
+          return res.status(400).json({ error: 'Formato de imagen inválido' });
+        }
+        if (f.length > 2_000_000) return res.status(400).json({ error: 'Cada imagen no puede superar 1.5MB' });
+      }
+
+      const updated = await prisma.booking.update({
+        where: { id: req.params.id },
+        data: { fotos },
+      });
+
+      // Notify client via push + email
+      sendPush(booking.clienteId, {
+        title: '📸 Reporte fotográfico disponible',
+        body: `Tu proveedor subió ${fotos.length} foto(s) del servicio.`,
+        url: `/booking-chat/${booking.id}`,
+        tag: 'fotos',
+      }).catch(() => {});
+
+      res.json({ ok: true, fotosCount: fotos.length });
+    } catch (e) {
+      console.error('[bookings photos]', e);
+      res.status(500).json({ error: 'Error al guardar fotos' });
+    }
+  }
+);
 
 module.exports = router;
