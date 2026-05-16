@@ -20,8 +20,12 @@ jest.mock('../src/lib/email', () => ({
 
 jest.mock('../src/lib/prisma', () => ({
   user:            { count: jest.fn(), findMany: jest.fn(), findUnique: jest.fn(), update: jest.fn() },
-  booking:         { count: jest.fn(), aggregate: jest.fn(), findMany: jest.fn(), update: jest.fn() },
+  booking:         { count: jest.fn(), aggregate: jest.fn(), groupBy: jest.fn(), findMany: jest.fn(), update: jest.fn() },
   providerProfile: { count: jest.fn(), findMany: jest.fn(), update: jest.fn() },
+  disputa:         { findMany: jest.fn(), findUnique: jest.fn(), count: jest.fn(), update: jest.fn() },
+  review:          { findMany: jest.fn(), findUnique: jest.fn(), count: jest.fn(), update: jest.fn() },
+  crmTag:          { findMany: jest.fn(), create: jest.fn(), update: jest.fn(), delete: jest.fn() },
+  crmTagAsignacion:{ upsert: jest.fn(), create: jest.fn(), deleteMany: jest.fn() },
 }));
 
 const prisma = require('../src/lib/prisma');
@@ -357,5 +361,333 @@ describe('PATCH /admin/bookings/:id — cambiar estado de reserva', () => {
       .patch('/admin/bookings/book-001')
       .send({ estado: 'COMPLETADO' });
     expect(res.statusCode).toBe(401);
+  });
+});
+
+// ============================================================
+describe('GET /admin/leaderboard — top proveedores', () => {
+// ============================================================
+
+  it('admin obtiene leaderboard de proveedores', async () => {
+    prisma.providerProfile.findMany.mockResolvedValue([
+      { id: 'p1', calificacion: 4.9, reservasCompletadas: 50, totalReviews: 12,
+        tasaAceptacion: 0.95, verificado: true, tarifaPorHora: 60000,
+        user: { nombre: 'Carlos', ciudad: 'Bogotá', email: 'c@t.com' } },
+    ]);
+    prisma.booking.groupBy.mockResolvedValue([
+      { proveedorId: 'p1', _sum: { precioTotal: 3000000 } },
+    ]);
+
+    const res = await request(app)
+      .get('/admin/leaderboard')
+      .set('Authorization', `Bearer ${tokenAdmin()}`);
+
+    expect(res.statusCode).toBe(200);
+    expect(res.body.leaderboard).toHaveLength(1);
+    expect(res.body.leaderboard[0].rank).toBe(1);
+  });
+
+  it('cliente recibe 403', async () => {
+    const res = await request(app).get('/admin/leaderboard').set('Authorization', `Bearer ${tokenCliente()}`);
+    expect(res.statusCode).toBe(403);
+  });
+});
+
+// ============================================================
+describe('GET /admin/stats/monthly — ingresos mensuales', () => {
+// ============================================================
+
+  it('admin obtiene datos mensuales', async () => {
+    // 6 months × (aggregate + count) = 12 calls — use persistent mocks
+    prisma.booking.aggregate.mockResolvedValue({ _sum: { precioTotal: 500000, comisionDutyJoy: 75000 } });
+    prisma.booking.count.mockResolvedValue(5);
+
+    const res = await request(app)
+      .get('/admin/stats/monthly')
+      .set('Authorization', `Bearer ${tokenAdmin()}`);
+
+    expect(res.statusCode).toBe(200);
+    expect(res.body.months).toBeDefined();
+    expect(Array.isArray(res.body.months)).toBe(true);
+    expect(res.body.months).toHaveLength(6);
+  });
+
+  it('cliente recibe 403', async () => {
+    const res = await request(app).get('/admin/stats/monthly').set('Authorization', `Bearer ${tokenCliente()}`);
+    expect(res.statusCode).toBe(403);
+  });
+});
+
+// ============================================================
+describe('GET /admin/bookings — listar todas las reservas', () => {
+// ============================================================
+
+  it('admin lista reservas con paginación', async () => {
+    prisma.booking.findMany.mockResolvedValue([
+      { id: 'b1', estado: 'PENDIENTE', precioTotal: 80000,
+        cliente: { nombre: 'Juan', email: 'j@t.com' },
+        proveedor: { user: { nombre: 'Carlos' } } },
+    ]);
+    prisma.booking.count.mockResolvedValue(1);
+
+    const res = await request(app)
+      .get('/admin/bookings')
+      .set('Authorization', `Bearer ${tokenAdmin()}`);
+
+    expect(res.statusCode).toBe(200);
+    expect(res.body.bookings).toHaveLength(1);
+    expect(res.body.total).toBe(1);
+  });
+
+  it('filtra por estado', async () => {
+    prisma.booking.findMany.mockResolvedValue([]);
+    prisma.booking.count.mockResolvedValue(0);
+
+    const res = await request(app)
+      .get('/admin/bookings?estado=CANCELADO')
+      .set('Authorization', `Bearer ${tokenAdmin()}`);
+
+    expect(res.statusCode).toBe(200);
+    expect(prisma.booking.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({ where: expect.objectContaining({ estado: 'CANCELADO' }) })
+    );
+  });
+
+  it('cliente recibe 403', async () => {
+    const res = await request(app).get('/admin/bookings').set('Authorization', `Bearer ${tokenCliente()}`);
+    expect(res.statusCode).toBe(403);
+  });
+});
+
+// ============================================================
+describe('GET /admin/disputes — listar disputas', () => {
+// ============================================================
+
+  const disputaBase = {
+    id: 'disp-001', estado: 'abierta', mensaje: 'Proveedor no llegó',
+    createdAt: new Date(), updatedAt: new Date(),
+    cliente: { nombre: 'Juan', email: 'j@t.com' },
+    booking: { tipoServicio: 'plomeria', fechaServicio: new Date(), precioTotal: 80000,
+               estado: 'CONFIRMADO', proveedor: { user: { nombre: 'Carlos' } } },
+  };
+
+  it('admin lista disputas', async () => {
+    prisma.disputa.findMany.mockResolvedValue([disputaBase]);
+    prisma.disputa.count.mockResolvedValue(1);
+
+    const res = await request(app)
+      .get('/admin/disputes')
+      .set('Authorization', `Bearer ${tokenAdmin()}`);
+
+    expect(res.statusCode).toBe(200);
+    expect(res.body.disputes).toHaveLength(1);
+    expect(res.body.stats).toBeDefined();
+  });
+
+  it('filtra por estado', async () => {
+    prisma.disputa.findMany.mockResolvedValue([]);
+    prisma.disputa.count.mockResolvedValue(0);
+
+    const res = await request(app)
+      .get('/admin/disputes?estado=en_revision')
+      .set('Authorization', `Bearer ${tokenAdmin()}`);
+
+    expect(res.statusCode).toBe(200);
+    expect(prisma.disputa.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({ where: expect.objectContaining({ estado: 'en_revision' }) })
+    );
+  });
+
+  it('cliente recibe 403', async () => {
+    const res = await request(app).get('/admin/disputes').set('Authorization', `Bearer ${tokenCliente()}`);
+    expect(res.statusCode).toBe(403);
+  });
+});
+
+// ============================================================
+describe('PATCH /admin/disputes/:id — actualizar disputa', () => {
+// ============================================================
+
+  it('admin resuelve disputa con nota', async () => {
+    prisma.disputa.update.mockResolvedValue({ id: 'disp-001', estado: 'resuelta', resolucion: 'Reembolso aprobado' });
+
+    const res = await request(app)
+      .patch('/admin/disputes/disp-001')
+      .set('Authorization', `Bearer ${tokenAdmin()}`)
+      .send({ estado: 'resuelta', resolucion: 'Reembolso aprobado' });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.body.disputa.estado).toBe('resuelta');
+  });
+
+  it('rechaza estado inválido (400)', async () => {
+    const res = await request(app)
+      .patch('/admin/disputes/disp-001')
+      .set('Authorization', `Bearer ${tokenAdmin()}`)
+      .send({ estado: 'estado_inventado' });
+
+    expect(res.statusCode).toBe(400);
+    expect(res.body.error).toMatch(/Estado inválido/);
+  });
+
+  it('cliente recibe 403', async () => {
+    const res = await request(app)
+      .patch('/admin/disputes/disp-001')
+      .set('Authorization', `Bearer ${tokenCliente()}`)
+      .send({ estado: 'resuelta' });
+    expect(res.statusCode).toBe(403);
+  });
+});
+
+// ============================================================
+describe('POST /admin/disputes/:id/ai-resolve — IA auto-resolución', () => {
+// ============================================================
+
+  it('devuelve 503 si OpenAI no está configurado', async () => {
+    // openai is null when OPENAI_API_KEY is absent (default in test env)
+    const res = await request(app)
+      .post('/admin/disputes/disp-001/ai-resolve')
+      .set('Authorization', `Bearer ${tokenAdmin()}`);
+
+    expect(res.statusCode).toBe(503);
+    expect(res.body.error).toMatch(/OPENAI_API_KEY/);
+  });
+
+  it('cliente recibe 403', async () => {
+    const res = await request(app)
+      .post('/admin/disputes/disp-001/ai-resolve')
+      .set('Authorization', `Bearer ${tokenCliente()}`);
+    expect(res.statusCode).toBe(403);
+  });
+});
+
+// ============================================================
+describe('GET /admin/reviews/flagged — reseñas con fraude detectado', () => {
+// ============================================================
+
+  it('admin ve reseñas marcadas con fraude', async () => {
+    prisma.review.findMany.mockResolvedValue([
+      { id: 'rev-001', fraudScore: 0.9, calificacion: 5, comentario: 'Excelente!!',
+        fraudFlags: ['texto_generico'], fraudOculta: false,
+        cliente: { nombre: 'Juan', email: 'j@t.com' },
+        proveedor: { user: { nombre: 'Carlos' } },
+        booking: { tipoServicio: 'plomeria', fechaServicio: new Date() } },
+    ]);
+    prisma.review.count.mockResolvedValue(1);
+
+    const res = await request(app)
+      .get('/admin/reviews/flagged')
+      .set('Authorization', `Bearer ${tokenAdmin()}`);
+
+    expect(res.statusCode).toBe(200);
+    expect(res.body.reviews).toHaveLength(1);
+    expect(res.body.stats).toBeDefined();
+  });
+
+  it('cliente recibe 403', async () => {
+    const res = await request(app).get('/admin/reviews/flagged').set('Authorization', `Bearer ${tokenCliente()}`);
+    expect(res.statusCode).toBe(403);
+  });
+});
+
+// ============================================================
+describe('PATCH /admin/reviews/:id/visibility — ocultar/mostrar reseña', () => {
+// ============================================================
+
+  it('admin oculta una reseña fraudulenta', async () => {
+    prisma.review.update.mockResolvedValue({ id: 'rev-001', fraudOculta: true });
+
+    const res = await request(app)
+      .patch('/admin/reviews/rev-001/visibility')
+      .set('Authorization', `Bearer ${tokenAdmin()}`)
+      .send({ oculta: true });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.body.mensaje).toMatch(/ocultada/);
+  });
+
+  it('admin restaura una reseña', async () => {
+    prisma.review.update.mockResolvedValue({ id: 'rev-001', fraudOculta: false });
+
+    const res = await request(app)
+      .patch('/admin/reviews/rev-001/visibility')
+      .set('Authorization', `Bearer ${tokenAdmin()}`)
+      .send({ oculta: false });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.body.mensaje).toMatch(/restaurada/);
+  });
+
+  it('falla si oculta no es boolean (400)', async () => {
+    const res = await request(app)
+      .patch('/admin/reviews/rev-001/visibility')
+      .set('Authorization', `Bearer ${tokenAdmin()}`)
+      .send({ oculta: 1 });  // number, not boolean
+
+    expect(res.statusCode).toBe(400);
+    expect(res.body.error).toMatch(/true o false/);
+  });
+
+  it('cliente recibe 403', async () => {
+    const res = await request(app)
+      .patch('/admin/reviews/rev-001/visibility')
+      .set('Authorization', `Bearer ${tokenCliente()}`)
+      .send({ oculta: true });
+    expect(res.statusCode).toBe(403);
+  });
+});
+
+// ============================================================
+describe('GET /admin/tags — listar CRM tags', () => {
+// ============================================================
+
+  it('admin lista tags', async () => {
+    prisma.crmTag.findMany.mockResolvedValue([
+      { id: 'tag-001', nombre: 'VIP', color: '#FFD93D', descripcion: 'Cliente premium', _count: { asignaciones: 3 } },
+    ]);
+
+    const res = await request(app)
+      .get('/admin/tags')
+      .set('Authorization', `Bearer ${tokenAdmin()}`);
+
+    expect(res.statusCode).toBe(200);
+    expect(Array.isArray(res.body.tags)).toBe(true);
+    expect(res.body.tags[0].nombre).toBe('VIP');
+  });
+
+  it('cliente recibe 403', async () => {
+    const res = await request(app).get('/admin/tags').set('Authorization', `Bearer ${tokenCliente()}`);
+    expect(res.statusCode).toBe(403);
+  });
+});
+
+// ============================================================
+describe('POST /admin/tags — crear tag', () => {
+// ============================================================
+
+  it('admin crea un tag nuevo', async () => {
+    prisma.crmTag.create.mockResolvedValue({ id: 'tag-002', nombre: 'Recurrente', color: '#0ABFBC' });
+
+    const res = await request(app)
+      .post('/admin/tags')
+      .set('Authorization', `Bearer ${tokenAdmin()}`)
+      .send({ nombre: 'Recurrente', color: '#0ABFBC' });
+
+    expect(res.statusCode).toBe(201);
+    expect(res.body.tag.nombre).toBe('Recurrente');
+  });
+
+  it('falla sin nombre (400)', async () => {
+    const res = await request(app)
+      .post('/admin/tags')
+      .set('Authorization', `Bearer ${tokenAdmin()}`)
+      .send({ color: '#FF0000' });
+
+    expect(res.statusCode).toBe(400);
+  });
+
+  it('cliente recibe 403', async () => {
+    const res = await request(app).post('/admin/tags').set('Authorization', `Bearer ${tokenCliente()}`).send({ nombre: 'x' });
+    expect(res.statusCode).toBe(403);
   });
 });
