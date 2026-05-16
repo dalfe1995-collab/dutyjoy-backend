@@ -568,6 +568,59 @@ router.post('/:id/photos',
   }
 );
 
+// GET /bookings/:id/provider-location — cliente ve ubicación en tiempo real del proveedor
+router.get('/:id/provider-location', verifyToken, async (req, res) => {
+  try {
+    if (req.user.rol !== 'CLIENTE') {
+      return res.status(403).json({ error: 'Solo el cliente puede ver la ubicación del proveedor' });
+    }
+
+    const booking = await prisma.booking.findUnique({
+      where: { id: req.params.id },
+      include: {
+        proveedor: {
+          select: {
+            id: true,
+            location: true,
+            user: { select: { nombre: true } },
+          },
+        },
+      },
+    });
+
+    if (!booking) return res.status(404).json({ error: 'Reserva no encontrada' });
+    if (booking.clienteId !== req.user.id) return res.status(403).json({ error: 'No autorizado' });
+
+    if (!['CONFIRMADO', 'EN_PROGRESO'].includes(booking.estado)) {
+      return res.status(400).json({ error: 'La ubicación solo está disponible cuando la reserva está CONFIRMADA o EN PROGRESO' });
+    }
+
+    const loc = booking.proveedor.location;
+    if (!loc || !loc.activo) {
+      return res.json({ disponible: false, motivo: 'El proveedor no ha compartido su ubicación' });
+    }
+
+    // Stale check: > 10 min → provider offline
+    const staleMs = 10 * 60 * 1000;
+    const age = Date.now() - new Date(loc.updatedAt).getTime();
+    if (age > staleMs) {
+      return res.json({ disponible: false, motivo: 'Ubicación desactualizada (más de 10 minutos)' });
+    }
+
+    res.json({
+      disponible: true,
+      lat: loc.lat,
+      lng: loc.lng,
+      proveedorNombre: booking.proveedor.user.nombre,
+      actualizadoHace: Math.round(age / 1000), // segundos
+      updatedAt: loc.updatedAt,
+    });
+  } catch (e) {
+    console.error('[bookings/provider-location]', e);
+    res.status(500).json({ error: 'Error al obtener ubicación' });
+  }
+});
+
 // POST /bookings/:id/generate-code — cliente genera código de inicio
 router.post('/:id/generate-code', verifyToken, async (req, res) => {
   try {

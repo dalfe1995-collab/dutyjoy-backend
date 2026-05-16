@@ -96,6 +96,19 @@ model ProviderProfile {
   bookings   Booking[]
   reviews    Review[]
   favoritos  Favorito[]
+  location   ProviderLocation?
+}
+
+model ProviderLocation {
+  id         String          @id @default(cuid())
+  providerId String          @unique
+  provider   ProviderProfile @relation(fields: [providerId], references: [id], onDelete: Cascade)
+  lat        Float
+  lng        Float
+  activo     Boolean         @default(true)
+  updatedAt  DateTime        @updatedAt
+
+  @@index([providerId])
 }
 
 model Booking {

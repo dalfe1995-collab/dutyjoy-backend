@@ -25,6 +25,10 @@ jest.mock('../src/lib/prisma', () => ({
     count:      jest.fn(),
     update:     jest.fn(),
   },
+  providerLocation: {
+    upsert:     jest.fn(),
+    findUnique: jest.fn(),
+  },
   user: { findUnique: jest.fn() },
 }));
 
@@ -352,5 +356,182 @@ describe('GET /providers/:id — perfil público de un proveedor', () => {
     const res = await request(app).get('/providers/no-existe');
 
     expect(res.statusCode).toBe(404);
+  });
+});
+
+// ============================================================
+describe('PUT /providers/me/location — actualizar ubicación GPS', () => {
+// ============================================================
+
+  const prisma = require('../src/lib/prisma');
+
+  const locActualizada = {
+    providerId: 'profile-001',
+    lat: 4.7110,
+    lng: -74.0721,
+    activo: true,
+    updatedAt: new Date(),
+  };
+
+  it('proveedor actualiza ubicación exitosamente', async () => {
+    prisma.providerProfile.findUnique.mockResolvedValue({ id: 'profile-001' });
+    prisma.providerLocation.upsert.mockResolvedValue(locActualizada);
+
+    const res = await request(app)
+      .put('/providers/me/location')
+      .set('Authorization', `Bearer ${tokenProveedor()}`)
+      .send({ lat: 4.7110, lng: -74.0721 });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.body.ok).toBe(true);
+    expect(res.body.lat).toBe(4.711);
+    expect(res.body.lng).toBe(-74.0721);
+  });
+
+  it('proveedor puede desactivar su ubicación (activo: false)', async () => {
+    prisma.providerProfile.findUnique.mockResolvedValue({ id: 'profile-001' });
+    prisma.providerLocation.upsert.mockResolvedValue({ ...locActualizada, activo: false });
+
+    const res = await request(app)
+      .put('/providers/me/location')
+      .set('Authorization', `Bearer ${tokenProveedor()}`)
+      .send({ lat: 4.7110, lng: -74.0721, activo: false });
+
+    expect(res.statusCode).toBe(200);
+    expect(prisma.providerLocation.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        update: expect.objectContaining({ activo: false }),
+      })
+    );
+  });
+
+  it('cliente NO puede actualizar ubicación (403)', async () => {
+    const res = await request(app)
+      .put('/providers/me/location')
+      .set('Authorization', `Bearer ${tokenCliente()}`)
+      .send({ lat: 4.71, lng: -74.07 });
+
+    expect(res.statusCode).toBe(403);
+    expect(res.body.error).toMatch(/proveedores/);
+  });
+
+  it('falla si faltan lat o lng (400)', async () => {
+    const res = await request(app)
+      .put('/providers/me/location')
+      .set('Authorization', `Bearer ${tokenProveedor()}`)
+      .send({ lat: 4.71 }); // missing lng
+
+    expect(res.statusCode).toBe(400);
+    expect(res.body.error).toMatch(/lat y lng/);
+  });
+
+  it('falla con coordenadas fuera de Colombia (400)', async () => {
+    const res = await request(app)
+      .put('/providers/me/location')
+      .set('Authorization', `Bearer ${tokenProveedor()}`)
+      .send({ lat: 40.7128, lng: -74.0060 }); // New York
+
+    expect(res.statusCode).toBe(400);
+    expect(res.body.error).toMatch(/Colombia/);
+  });
+
+  it('falla con valores no numéricos (400)', async () => {
+    const res = await request(app)
+      .put('/providers/me/location')
+      .set('Authorization', `Bearer ${tokenProveedor()}`)
+      .send({ lat: 'abc', lng: 'xyz' });
+
+    expect(res.statusCode).toBe(400);
+    expect(res.body.error).toMatch(/números válidos/);
+  });
+
+  it('falla si perfil no encontrado (404)', async () => {
+    prisma.providerProfile.findUnique.mockResolvedValue(null);
+
+    const res = await request(app)
+      .put('/providers/me/location')
+      .set('Authorization', `Bearer ${tokenProveedor()}`)
+      .send({ lat: 4.71, lng: -74.07 });
+
+    expect(res.statusCode).toBe(404);
+  });
+
+  it('requiere autenticación (401)', async () => {
+    const res = await request(app)
+      .put('/providers/me/location')
+      .send({ lat: 4.71, lng: -74.07 });
+
+    expect(res.statusCode).toBe(401);
+  });
+});
+
+// ============================================================
+describe('GET /providers — búsqueda por proximidad (geo)', () => {
+// ============================================================
+
+  const prisma = require('../src/lib/prisma');
+
+  const provCercano = {
+    ...perfilCompleto,
+    id: 'profile-cercano',
+    location: { lat: 4.7120, lng: -74.0700, activo: true, updatedAt: new Date() }, // ~0.1km
+  };
+  const provLejano = {
+    ...perfilCompleto,
+    id: 'profile-lejano',
+    location: { lat: 4.8000, lng: -74.1500, activo: true, updatedAt: new Date() }, // ~15km
+  };
+  const provSinUbicacion = {
+    ...perfilCompleto,
+    id: 'profile-sin-loc',
+    location: null,
+  };
+
+  it('retorna proveedores dentro del radio ordenados por distancia', async () => {
+    prisma.providerProfile.findMany.mockResolvedValue([provCercano, provLejano, provSinUbicacion]);
+
+    // Client at Bogotá centro ~4.711, -74.072 — radio 5km
+    const res = await request(app)
+      .get('/providers?lat=4.711&lng=-74.072&radio=5');
+
+    expect(res.statusCode).toBe(200);
+    expect(res.body.geo).toBe(true);
+    // provLejano (~15km) and provSinUbicacion excluded
+    expect(res.body.providers.length).toBeGreaterThanOrEqual(1);
+    expect(res.body.providers[0].id).toBe('profile-cercano');
+    expect(res.body.providers[0].distanciaKm).toBeDefined();
+  });
+
+  it('excluye proveedores sin ubicación registrada', async () => {
+    prisma.providerProfile.findMany.mockResolvedValue([provSinUbicacion]);
+
+    const res = await request(app)
+      .get('/providers?lat=4.711&lng=-74.072&radio=20');
+
+    expect(res.statusCode).toBe(200);
+    expect(res.body.providers).toHaveLength(0);
+  });
+
+  it('usa radio por defecto 20km si no se especifica', async () => {
+    prisma.providerProfile.findMany.mockResolvedValue([]);
+    prisma.providerProfile.count.mockResolvedValue(0);
+
+    const res = await request(app)
+      .get('/providers?lat=4.711&lng=-74.072');
+
+    expect(res.statusCode).toBe(200);
+    expect(res.body.geo).toBe(true);
+    expect(res.body.radioKm).toBe(20);
+  });
+
+  it('busca normal (sin geo) si no se pasan lat/lng', async () => {
+    prisma.providerProfile.findMany.mockResolvedValue([perfilCompleto]);
+    prisma.providerProfile.count.mockResolvedValue(1);
+
+    const res = await request(app).get('/providers');
+
+    expect(res.statusCode).toBe(200);
+    expect(res.body.geo).toBeUndefined();
+    expect(res.body.total).toBe(1);
   });
 });

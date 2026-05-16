@@ -33,6 +33,10 @@ jest.mock('../src/lib/prisma', () => ({
   disputa: {
     create: jest.fn().mockResolvedValue({ id: 'disputa-001', estado: 'abierta' }),
   },
+  providerLocation: {
+    upsert:     jest.fn(),
+    findUnique: jest.fn(),
+  },
 }));
 
 jest.mock('../src/lib/push', () => ({ sendPush: jest.fn().mockResolvedValue(undefined) }));
@@ -475,6 +479,127 @@ describe('POST /bookings/:id/report — reportar problema', () => {
       .send({ mensaje: 'Sin token de autenticación presente' });
 
     expect(res.statusCode).toBe(401);
+  });
+});
+
+// ============================================================
+describe('GET /bookings/:id/provider-location — ubicación del proveedor', () => {
+// ============================================================
+
+  const locFresca = {
+    lat: 4.7110,
+    lng: -74.0721,
+    activo: true,
+    updatedAt: new Date(), // just now
+  };
+
+  const reservaConfirmadaConLoc = {
+    ...reservaBase,
+    estado: 'CONFIRMADO',
+    proveedor: {
+      id: 'profile-proveedor-001',
+      location: locFresca,
+      user: { nombre: 'Carlos Plomero' },
+    },
+  };
+
+  it('cliente ve ubicación cuando reserva CONFIRMADA y ubicación fresca', async () => {
+    prisma.booking.findUnique.mockResolvedValue(reservaConfirmadaConLoc);
+
+    const res = await request(app)
+      .get('/bookings/booking-001/provider-location')
+      .set('Authorization', `Bearer ${tokenCliente()}`);
+
+    expect(res.statusCode).toBe(200);
+    expect(res.body.disponible).toBe(true);
+    expect(res.body.lat).toBe(4.711);
+    expect(res.body.lng).toBe(-74.0721);
+    expect(res.body.proveedorNombre).toBe('Carlos Plomero');
+  });
+
+  it('cliente ve ubicación cuando reserva EN_PROGRESO', async () => {
+    prisma.booking.findUnique.mockResolvedValue({ ...reservaConfirmadaConLoc, estado: 'EN_PROGRESO' });
+
+    const res = await request(app)
+      .get('/bookings/booking-001/provider-location')
+      .set('Authorization', `Bearer ${tokenCliente()}`);
+
+    expect(res.statusCode).toBe(200);
+    expect(res.body.disponible).toBe(true);
+  });
+
+  it('retorna disponible:false si proveedor no compartió ubicación', async () => {
+    prisma.booking.findUnique.mockResolvedValue({
+      ...reservaConfirmadaConLoc,
+      proveedor: { ...reservaConfirmadaConLoc.proveedor, location: null },
+    });
+
+    const res = await request(app)
+      .get('/bookings/booking-001/provider-location')
+      .set('Authorization', `Bearer ${tokenCliente()}`);
+
+    expect(res.statusCode).toBe(200);
+    expect(res.body.disponible).toBe(false);
+    expect(res.body.motivo).toMatch(/no ha compartido/);
+  });
+
+  it('retorna disponible:false si ubicación está desactualizada (>10 min)', async () => {
+    const stale = new Date(Date.now() - 15 * 60 * 1000); // 15 min ago
+    prisma.booking.findUnique.mockResolvedValue({
+      ...reservaConfirmadaConLoc,
+      proveedor: {
+        ...reservaConfirmadaConLoc.proveedor,
+        location: { ...locFresca, updatedAt: stale },
+      },
+    });
+
+    const res = await request(app)
+      .get('/bookings/booking-001/provider-location')
+      .set('Authorization', `Bearer ${tokenCliente()}`);
+
+    expect(res.statusCode).toBe(200);
+    expect(res.body.disponible).toBe(false);
+    expect(res.body.motivo).toMatch(/10 minutos/);
+  });
+
+  it('falla si reserva no está CONFIRMADA/EN_PROGRESO (400)', async () => {
+    prisma.booking.findUnique.mockResolvedValue({ ...reservaConfirmadaConLoc, estado: 'PENDIENTE' });
+
+    const res = await request(app)
+      .get('/bookings/booking-001/provider-location')
+      .set('Authorization', `Bearer ${tokenCliente()}`);
+
+    expect(res.statusCode).toBe(400);
+    expect(res.body.error).toMatch(/CONFIRMADA/);
+  });
+
+  it('proveedor NO puede ver ubicación de otro (403)', async () => {
+    const res = await request(app)
+      .get('/bookings/booking-001/provider-location')
+      .set('Authorization', `Bearer ${tokenProveedor()}`);
+
+    expect(res.statusCode).toBe(403);
+  });
+
+  it('cliente ajeno NO puede ver ubicación (403)', async () => {
+    const otroToken = jwt.sign({ id: 'otro-999', email: 'otro@test.com', rol: 'CLIENTE' }, SECRET, { expiresIn: '1h' });
+    prisma.booking.findUnique.mockResolvedValue(reservaConfirmadaConLoc); // clienteId = 'cliente-001'
+
+    const res = await request(app)
+      .get('/bookings/booking-001/provider-location')
+      .set('Authorization', `Bearer ${otroToken}`);
+
+    expect(res.statusCode).toBe(403);
+  });
+
+  it('devuelve 404 si reserva no existe', async () => {
+    prisma.booking.findUnique.mockResolvedValue(null);
+
+    const res = await request(app)
+      .get('/bookings/no-existe/provider-location')
+      .set('Authorization', `Bearer ${tokenCliente()}`);
+
+    expect(res.statusCode).toBe(404);
   });
 });
 

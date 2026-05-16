@@ -8,10 +8,25 @@ const { updateProviderEmbedding, semanticSearch } = require('../lib/embeddings')
 
 const openai = process.env.OPENAI_API_KEY ? new OpenAI({ apiKey: process.env.OPENAI_API_KEY }) : null;
 
+// Haversine distance in km between two lat/lng points
+function haversineKm(lat1, lng1, lat2, lng2) {
+  const R = 6371;
+  const dLat = (lat2 - lat1) * Math.PI / 180;
+  const dLng = (lng2 - lng1) * Math.PI / 180;
+  const a = Math.sin(dLat / 2) ** 2 +
+            Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) * Math.sin(dLng / 2) ** 2;
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
+const LOCATION_STALE_MS = 10 * 60 * 1000; // 10 min → provider considered offline
+
 // GET /providers — listar proveedores con filtros + búsqueda semántica opcional (?q=)
+// Geo search: ?lat=X&lng=Y&radio=20 (radio in km, defaults to 20)
 router.get('/', async (req, res) => {
   try {
-    const { ciudad, servicio, minCalificacion, minTarifa, maxTarifa, verificado, search, orden = 'calificacion_desc', page = 1, limit = 12, q, instantBooking } = req.query;
+    const { ciudad, servicio, minCalificacion, minTarifa, maxTarifa, verificado, search,
+            orden = 'calificacion_desc', page = 1, limit = 12, q, instantBooking,
+            lat, lng, radio } = req.query;
 
     const tarifaWhere = {};
     if (minTarifa) tarifaWhere.gte = parseFloat(minTarifa);
@@ -27,6 +42,47 @@ router.get('/', async (req, res) => {
       ...(instantBooking === 'true' && { instantBooking: true }),
       ...(search && { user: { nombre: { contains: search, mode: 'insensitive' } } }),
     };
+
+    // ── Geo search: lat + lng provided → filter + sort by distance ───────
+    const geoMode = lat && lng && !isNaN(parseFloat(lat)) && !isNaN(parseFloat(lng));
+    if (geoMode) {
+      const clientLat  = parseFloat(lat);
+      const clientLng  = parseFloat(lng);
+      const radioKm    = parseFloat(radio) || 20;
+
+      // Fetch all matching providers with their location (no pagination yet)
+      const all = await prisma.providerProfile.findMany({
+        where,
+        include: {
+          user:     { select: { nombre: true, ciudad: true } },
+          location: true,
+        },
+      });
+
+      // Attach distance, filter by radius, sort by distance asc
+      const withDist = all
+        .map(p => {
+          if (!p.location) return { ...p, distanciaKm: null };
+          const km = haversineKm(clientLat, clientLng, p.location.lat, p.location.lng);
+          return { ...p, distanciaKm: parseFloat(km.toFixed(2)) };
+        })
+        .filter(p => p.distanciaKm !== null && p.distanciaKm <= radioKm)
+        .sort((a, b) => a.distanciaKm - b.distanciaKm);
+
+      const pageN   = parseInt(page);
+      const limitN  = parseInt(limit);
+      const paginated = withDist.slice((pageN - 1) * limitN, pageN * limitN);
+
+      return res.json({
+        providers: paginated,
+        total: withDist.length,
+        page: pageN,
+        totalPages: Math.ceil(withDist.length / limitN),
+        geo: true,
+        centro: { lat: clientLat, lng: clientLng },
+        radioKm,
+      });
+    }
 
     // Búsqueda semántica con ?q=
     if (q && q.trim().length > 2) {
@@ -1478,6 +1534,49 @@ router.delete('/me/packages/:pkgId', verifyToken, async (req, res) => {
     await prisma.providerProfile.update({ where: { userId: req.user.id }, data: { paquetes: filtered } });
     res.json({ ok: true });
   } catch (e) { res.status(500).json({ error: 'Error' }); }
+});
+
+// PUT /providers/me/location — proveedor actualiza su ubicación GPS en tiempo real
+router.put('/me/location', verifyToken, async (req, res) => {
+  try {
+    if (req.user.rol !== 'PROVEEDOR') {
+      return res.status(403).json({ error: 'Solo los proveedores pueden actualizar su ubicación' });
+    }
+
+    const { lat, lng, activo = true } = req.body;
+
+    if (lat === undefined || lng === undefined) {
+      return res.status(400).json({ error: 'lat y lng son requeridos' });
+    }
+
+    const latN = parseFloat(lat);
+    const lngN = parseFloat(lng);
+
+    if (isNaN(latN) || isNaN(lngN)) {
+      return res.status(400).json({ error: 'lat y lng deben ser números válidos' });
+    }
+    // Colombia bounding box (approx): lat -4.2..12.5, lng -79.0..-66.8
+    if (latN < -4.5 || latN > 13 || lngN < -80 || lngN > -66) {
+      return res.status(400).json({ error: 'Coordenadas fuera del rango permitido para Colombia' });
+    }
+
+    const profile = await prisma.providerProfile.findUnique({
+      where: { userId: req.user.id },
+      select: { id: true },
+    });
+    if (!profile) return res.status(404).json({ error: 'Perfil de proveedor no encontrado' });
+
+    const location = await prisma.providerLocation.upsert({
+      where:  { providerId: profile.id },
+      create: { providerId: profile.id, lat: latN, lng: lngN, activo: Boolean(activo) },
+      update: { lat: latN, lng: lngN, activo: Boolean(activo) },
+    });
+
+    res.json({ ok: true, lat: location.lat, lng: location.lng, updatedAt: location.updatedAt });
+  } catch (e) {
+    console.error('[providers/me/location]', e);
+    res.status(500).json({ error: 'Error al actualizar ubicación' });
+  }
 });
 
 module.exports = router;
