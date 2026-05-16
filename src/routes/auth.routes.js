@@ -25,10 +25,16 @@ function issueTokens(user) {
   return { accessToken, refreshToken, refreshTokenExp };
 }
 
+function generateReferralCode(nombre) {
+  const prefix = (nombre || 'USER').replace(/\s+/g, '').toUpperCase().slice(0, 5);
+  const suffix = String(Math.floor(1000 + Math.random() * 9000));
+  return prefix + suffix;
+}
+
 // POST /auth/register
 router.post('/register', async (req, res) => {
   try {
-    const { nombre, email: emailAddr, password, telefono, ciudad, rol } = req.body;
+    const { nombre, email: emailAddr, password, telefono, ciudad, rol, ref } = req.body;
 
     if (!nombre || !emailAddr || !password) {
       return res.status(400).json({ error: 'Nombre, email y contraseña son requeridos' });
@@ -49,6 +55,18 @@ router.post('/register', async (req, res) => {
 
     const { accessToken, refreshToken, refreshTokenExp } = issueTokens({ id: 'tmp', email: emailAddr, rol: rol === 'PROVEEDOR' ? 'PROVEEDOR' : 'CLIENTE' });
 
+    // Resolve referrer (optional)
+    let referredById = null;
+    if (ref) {
+      const referrer = await prisma.user.findUnique({ where: { referralCode: ref.toUpperCase() }, select: { id: true } });
+      if (referrer) referredById = referrer.id;
+    }
+
+    // Generate unique referral code
+    let referralCode = generateReferralCode(nombre);
+    const existing = await prisma.user.findUnique({ where: { referralCode } });
+    if (existing) referralCode = generateReferralCode(nombre); // retry once on collision
+
     const user = await prisma.user.create({
       data: {
         nombre,
@@ -60,6 +78,8 @@ router.post('/register', async (req, res) => {
         emailVerifToken,
         refreshToken,
         refreshTokenExp,
+        referralCode,
+        referredById,
       },
     });
 

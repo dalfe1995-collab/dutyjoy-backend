@@ -23,6 +23,10 @@ model User {
   resetTokenExpiry  DateTime?
   refreshToken      String?
   refreshTokenExp   DateTime?
+  referralCode      String?   @unique  // e.g. "DANIE2847"
+  referredById      String?            // userId of referrer
+  referredBy        User?     @relation("Referrals", fields: [referredById], references: [id])
+  referrals         User[]    @relation("Referrals")
   createdAt         DateTime  @default(now())
   updatedAt         DateTime  @updatedAt
 
