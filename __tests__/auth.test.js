@@ -490,3 +490,171 @@ describe('GET /auth/verify-email — verificar email', () => {
     expect(res.body.error).toMatch(/Token requerido/);
   });
 });
+
+// ============================================================
+describe('POST /auth/refresh — renovar access token', () => {
+// ============================================================
+
+  const activeUser = {
+    id: 'user-001', email: 'juan@test.com', rol: 'CLIENTE', nombre: 'Juan',
+    activo: true, refreshToken: 'valid-refresh-token-xyz',
+    refreshTokenExp: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000), // 7 days ahead
+  };
+
+  it('renueva el token con refresh token válido', async () => {
+    prisma.user.findFirst.mockResolvedValue(activeUser);
+    prisma.user.update.mockResolvedValue(activeUser);
+
+    const res = await request(app)
+      .post('/auth/refresh')
+      .send({ refreshToken: 'valid-refresh-token-xyz' });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.body.token).toBeDefined();
+    expect(res.body.refreshToken).toBeDefined();
+    // New refresh token should be different (rotation)
+    expect(res.body.refreshToken).not.toBe('valid-refresh-token-xyz');
+  });
+
+  it('rechaza con refresh token inválido (401)', async () => {
+    prisma.user.findFirst.mockResolvedValue(null); // token not found
+
+    const res = await request(app)
+      .post('/auth/refresh')
+      .send({ refreshToken: 'token-invalido' });
+
+    expect(res.statusCode).toBe(401);
+    expect(res.body.error).toMatch(/inválido/);
+  });
+
+  it('rechaza sin refresh token (400)', async () => {
+    const res = await request(app)
+      .post('/auth/refresh')
+      .send({});
+
+    expect(res.statusCode).toBe(400);
+    expect(res.body.error).toMatch(/requerido/);
+  });
+});
+
+// ============================================================
+describe('POST /auth/logout — cerrar sesión', () => {
+// ============================================================
+  const { sign } = require('jsonwebtoken');
+  const SECRET = process.env.JWT_SECRET || 'test_secret';
+
+  it('cierra sesión invalidando el refresh token', async () => {
+    prisma.user.update.mockResolvedValue({});
+
+    const token = sign({ id: 'user-001', email: 'j@t.com', rol: 'CLIENTE' }, SECRET, { expiresIn: '1h' });
+    const res = await request(app)
+      .post('/auth/logout')
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(res.statusCode).toBe(200);
+    expect(res.body.mensaje).toMatch(/cerrada/);
+    expect(prisma.user.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: { refreshToken: null, refreshTokenExp: null },
+      })
+    );
+  });
+
+  it('requiere autenticación (401)', async () => {
+    const res = await request(app).post('/auth/logout');
+    expect(res.statusCode).toBe(401);
+  });
+});
+
+// ============================================================
+describe('POST /auth/resend-verification — reenviar email', () => {
+// ============================================================
+  const { sign } = require('jsonwebtoken');
+  const SECRET = process.env.JWT_SECRET || 'test_secret';
+
+  const token = () => sign({ id: 'user-001', email: 'j@t.com', rol: 'CLIENTE' }, SECRET, { expiresIn: '1h' });
+
+  it('reenvía email de verificación si no está verificado', async () => {
+    prisma.user.findUnique.mockResolvedValue({
+      id: 'user-001', email: 'j@t.com', nombre: 'Juan', emailVerificado: false,
+    });
+    prisma.user.update.mockResolvedValue({});
+
+    const res = await request(app)
+      .post('/auth/resend-verification')
+      .set('Authorization', `Bearer ${token()}`);
+
+    expect(res.statusCode).toBe(200);
+    expect(res.body.mensaje).toMatch(/reenviado/);
+  });
+
+  it('responde OK si ya está verificado (no falla)', async () => {
+    prisma.user.findUnique.mockResolvedValue({
+      id: 'user-001', email: 'j@t.com', nombre: 'Juan', emailVerificado: true,
+    });
+
+    const res = await request(app)
+      .post('/auth/resend-verification')
+      .set('Authorization', `Bearer ${token()}`);
+
+    expect(res.statusCode).toBe(200);
+    expect(res.body.mensaje).toMatch(/ya está verificado/);
+    expect(prisma.user.update).not.toHaveBeenCalled();
+  });
+
+  it('requiere autenticación (401)', async () => {
+    const res = await request(app).post('/auth/resend-verification');
+    expect(res.statusCode).toBe(401);
+  });
+});
+
+// ============================================================
+describe('POST /auth/register — referral code generation', () => {
+// ============================================================
+
+  it('registro incluye referralCode en respuesta', async () => {
+    const userConCodigo = {
+      id: 'new-001', nombre: 'María López', email: 'maria@test.com',
+      rol: 'CLIENTE', referralCode: 'MARIA4872',
+      refreshToken: 'rt', refreshTokenExp: new Date(),
+    };
+    prisma.user.findUnique.mockResolvedValue(null); // email not exists
+    prisma.user.create.mockResolvedValue(userConCodigo);
+    prisma.user.update.mockResolvedValue(userConCodigo);
+
+    const res = await request(app)
+      .post('/auth/register')
+      .send({ nombre: 'María López', email: 'maria@test.com', password: 'Segura#2025!' });
+
+    expect(res.statusCode).toBe(201);
+    expect(res.body.usuario.referralCode).toBeDefined();
+  });
+
+  it('acepta código de referido (ref) en registro', async () => {
+    const referrer = { id: 'ref-001', referralCode: 'JUAN1234' };
+    const newUser = {
+      id: 'new-002', nombre: 'Pedro V.', email: 'pedro@test.com',
+      rol: 'CLIENTE', referralCode: 'PEDRO5678', referredById: 'ref-001',
+      refreshToken: 'rt', refreshTokenExp: new Date(),
+    };
+    // findUnique: 1st call = email check (null), 2nd = referralCode lookup (referrer), 3rd = collision check (null)
+    prisma.user.findUnique
+      .mockResolvedValueOnce(null)     // email not exists
+      .mockResolvedValueOnce(referrer) // referral code lookup
+      .mockResolvedValueOnce(null);    // no collision on generated code
+    prisma.user.create.mockResolvedValue(newUser);
+    prisma.user.update.mockResolvedValue(newUser);
+
+    const res = await request(app)
+      .post('/auth/register')
+      .send({ nombre: 'Pedro V.', email: 'pedro@test.com', password: 'Segura#2025!', ref: 'JUAN1234' });
+
+    expect(res.statusCode).toBe(201);
+    // The create should have been called with referredById
+    expect(prisma.user.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ referredById: 'ref-001' }),
+      })
+    );
+  });
+});

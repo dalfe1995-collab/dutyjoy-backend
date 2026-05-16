@@ -160,35 +160,53 @@ router.post('/', verifyToken, async (req, res) => {
 });
 
 // GET /bookings/me — ver mis reservas (cliente o proveedor)
+// Query params: recurrencia (SEMANAL|QUINCENAL|MENSUAL|UNICA, comma-separated), estado, limit
 router.get('/me', verifyToken, async (req, res) => {
   try {
+    const { recurrencia, estado, limit } = req.query;
+    const take = limit ? Math.min(parseInt(limit) || 50, 200) : undefined;
+
+    // Build optional filters
+    const recurrenciaFilter = recurrencia
+      ? { recurrencia: { in: recurrencia.split(',').map(r => r.trim().toUpperCase()) } }
+      : {};
+    const estadoFilter = estado
+      ? { estado: estado.toUpperCase() }
+      : {};
+
     let bookings;
 
     if (req.user.rol === 'CLIENTE') {
       bookings = await prisma.booking.findMany({
-        where: { clienteId: req.user.id },
+        where: { clienteId: req.user.id, ...recurrenciaFilter, ...estadoFilter },
         include: {
           proveedor: { include: { user: { select: { nombre: true, ciudad: true, telefono: true } } } },
           review: true,
         },
         orderBy: { createdAt: 'desc' },
+        ...(take && { take }),
       });
     } else if (req.user.rol === 'PROVEEDOR') {
       const profile = await prisma.providerProfile.findUnique({ where: { userId: req.user.id } });
       if (!profile) return res.status(404).json({ error: 'Perfil de proveedor no encontrado' });
 
       bookings = await prisma.booking.findMany({
-        where: { proveedorId: profile.id },
+        where: { proveedorId: profile.id, ...recurrenciaFilter, ...estadoFilter },
         include: {
           cliente: { select: { nombre: true, email: true, telefono: true, ciudad: true } },
           review: true,
         },
         orderBy: { createdAt: 'desc' },
+        ...(take && { take }),
       });
     } else {
       return res.status(403).json({ error: 'Acceso denegado' });
     }
 
+    // Return as { bookings, total } when query params present, plain array otherwise (backwards compat)
+    if (recurrencia || estado || limit) {
+      return res.json({ bookings, total: bookings.length });
+    }
     res.json(bookings);
   } catch (error) {
     console.error(error);

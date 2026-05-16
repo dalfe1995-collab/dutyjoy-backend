@@ -101,7 +101,7 @@ router.post('/register', async (req, res) => {
       mensaje:      'Usuario registrado exitosamente',
       token:        finalAccess,
       refreshToken: finalRefresh,
-      usuario:      { id: user.id, nombre: user.nombre, email: user.email, rol: user.rol },
+      usuario:      { id: user.id, nombre: user.nombre, email: user.email, rol: user.rol, referralCode: user.referralCode },
     });
   } catch (error) {
     console.error(error);
