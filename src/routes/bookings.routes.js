@@ -331,8 +331,8 @@ router.patch('/:id/status', verifyToken, async (req, res) => {
         return res.status(400).json({ error: 'No puedes cancelar con menos de 2 horas de anticipación. Contacta al proveedor.' });
       }
     }
-    if (esProveedor && !['CONFIRMADO', 'EN_PROGRESO', 'COMPLETADO', 'CANCELADO'].includes(estado)) {
-      return res.status(403).json({ error: 'Transición de estado no permitida' });
+    if (esProveedor && !['CONFIRMADO', 'COMPLETADO', 'CANCELADO'].includes(estado)) {
+      return res.status(403).json({ error: 'Transición de estado no permitida. Para iniciar el servicio usa POST /bookings/:id/verify-code' });
     }
 
     const updateData = { estado };
@@ -567,5 +567,127 @@ router.post('/:id/photos',
     }
   }
 );
+
+// POST /bookings/:id/generate-code — cliente genera código de inicio
+router.post('/:id/generate-code', verifyToken, async (req, res) => {
+  try {
+    if (req.user.rol !== 'CLIENTE') {
+      return res.status(403).json({ error: 'Solo el cliente puede generar el código de inicio' });
+    }
+
+    const booking = await prisma.booking.findUnique({ where: { id: req.params.id } });
+    if (!booking) return res.status(404).json({ error: 'Reserva no encontrada' });
+    if (booking.clienteId !== req.user.id) return res.status(403).json({ error: 'No autorizado' });
+    if (booking.estado !== 'CONFIRMADO') {
+      return res.status(400).json({ error: 'El código solo se puede generar cuando la reserva está CONFIRMADA' });
+    }
+    if (booking.startCodeUsedAt) {
+      return res.status(400).json({ error: 'El servicio ya fue iniciado con un código anterior' });
+    }
+
+    const code   = String(Math.floor(100000 + Math.random() * 900000)); // 6 dígitos
+    const expiry = new Date(Date.now() + 30 * 60 * 1000);               // 30 min
+
+    await prisma.booking.update({
+      where: { id: req.params.id },
+      data: { startCode: code, startCodeExpiry: expiry, startCodeAttempts: 0 },
+    });
+
+    res.json({ startCode: code, expiraEn: expiry });
+  } catch (e) {
+    console.error('[generate-code]', e);
+    res.status(500).json({ error: 'Error al generar el código' });
+  }
+});
+
+// POST /bookings/:id/verify-code — proveedor ingresa código → EN_PROGRESO
+router.post('/:id/verify-code', verifyToken, async (req, res) => {
+  try {
+    if (req.user.rol !== 'PROVEEDOR') {
+      return res.status(403).json({ error: 'Solo el proveedor puede verificar el código' });
+    }
+
+    const { code } = req.body;
+    if (!code) return res.status(400).json({ error: 'El código es requerido' });
+
+    const profile = await prisma.providerProfile.findUnique({ where: { userId: req.user.id } });
+    if (!profile) return res.status(404).json({ error: 'Perfil de proveedor no encontrado' });
+
+    const booking = await prisma.booking.findUnique({
+      where: { id: req.params.id },
+      include: {
+        cliente:   { select: { id: true, nombre: true, email: true } },
+        proveedor: { include: { user: { select: { nombre: true, email: true } } } },
+      },
+    });
+    if (!booking) return res.status(404).json({ error: 'Reserva no encontrada' });
+    if (booking.proveedorId !== profile.id) return res.status(403).json({ error: 'No autorizado' });
+    if (booking.estado !== 'CONFIRMADO') {
+      return res.status(400).json({ error: 'La reserva no está en estado CONFIRMADO' });
+    }
+    if (booking.startCodeUsedAt) {
+      return res.status(400).json({ error: 'El servicio ya fue iniciado' });
+    }
+    if (!booking.startCode) {
+      return res.status(400).json({ error: 'El cliente aún no ha generado el código de inicio' });
+    }
+
+    // Max intentos
+    const MAX_ATTEMPTS = 3;
+    if (booking.startCodeAttempts >= MAX_ATTEMPTS) {
+      return res.status(429).json({ error: 'Demasiados intentos fallidos. El cliente debe generar un nuevo código.' });
+    }
+
+    // Expirado
+    if (booking.startCodeExpiry && new Date() > booking.startCodeExpiry) {
+      return res.status(400).json({ error: 'El código ha expirado. El cliente debe generar uno nuevo.' });
+    }
+
+    // Código incorrecto
+    if (booking.startCode !== String(code)) {
+      const attempts = booking.startCodeAttempts + 1;
+      await prisma.booking.update({
+        where: { id: req.params.id },
+        data: { startCodeAttempts: attempts },
+      });
+      const restantes = MAX_ATTEMPTS - attempts;
+      if (restantes <= 0) {
+        // Notify client via push
+        sendPush(booking.cliente.id, {
+          title: '⚠️ Código de inicio bloqueado',
+          body: 'Hubo demasiados intentos fallidos. Genera un nuevo código.',
+          url: `/my-bookings`,
+          tag: 'start-code-blocked',
+        }).catch(() => {});
+        return res.status(429).json({ error: 'Demasiados intentos fallidos. El cliente debe generar un nuevo código.' });
+      }
+      return res.status(400).json({ error: 'Código incorrecto', intentosRestantes: restantes });
+    }
+
+    // ✅ Código correcto → EN_PROGRESO
+    const updated = await prisma.booking.update({
+      where: { id: req.params.id },
+      data: { estado: 'EN_PROGRESO', startCodeUsedAt: new Date() },
+    });
+
+    notifyBookingStatusChange({
+      booking: { ...booking, clienteId: booking.clienteId, clienteNombre: booking.cliente.nombre },
+      nuevoEstado: 'EN_PROGRESO',
+      actorRol: 'PROVEEDOR',
+    }).catch(() => {});
+
+    sendPush(booking.cliente.id, {
+      title: '🔧 Servicio iniciado',
+      body: `${booking.proveedor.user.nombre} comenzó el servicio.`,
+      url: `/booking-chat/${booking.id}`,
+      tag: 'service-started',
+    }).catch(() => {});
+
+    res.json({ mensaje: 'Servicio iniciado exitosamente', booking: updated });
+  } catch (e) {
+    console.error('[verify-code]', e);
+    res.status(500).json({ error: 'Error al verificar el código' });
+  }
+});
 
 module.exports = router;

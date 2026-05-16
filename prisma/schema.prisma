@@ -117,6 +117,11 @@ model Booking {
   bookingsHijos   Booking[]       @relation("RecurrenciaBookings")
   motivoCancelacion String?       // razón de cancelación (opcional)
   fotos           String[]        // post-job photo URLs/base64 uploaded by provider
+  // ── Service start code ────────────────────────────────────────────────────
+  startCode         String?       // 6-digit code shown to client, entered by provider
+  startCodeExpiry   DateTime?     // valid for 30 min after generation
+  startCodeAttempts Int           @default(0)  // failed provider attempts (max 3)
+  startCodeUsedAt   DateTime?     // set when provider verifies successfully
   createdAt       DateTime        @default(now())
   updatedAt       DateTime        @updatedAt
 

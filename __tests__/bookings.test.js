@@ -35,6 +35,8 @@ jest.mock('../src/lib/prisma', () => ({
   },
 }));
 
+jest.mock('../src/lib/push', () => ({ sendPush: jest.fn().mockResolvedValue(undefined) }));
+
 const prisma = require('../src/lib/prisma');
 
 const SECRET = process.env.JWT_SECRET || 'test_secret';
@@ -473,5 +475,216 @@ describe('POST /bookings/:id/report — reportar problema', () => {
       .send({ mensaje: 'Sin token de autenticación presente' });
 
     expect(res.statusCode).toBe(401);
+  });
+});
+
+// ============================================================
+describe('POST /bookings/:id/generate-code — generar código de inicio', () => {
+// ============================================================
+
+  const reservaConfirmada = { ...reservaBase, estado: 'CONFIRMADO', startCode: null, startCodeUsedAt: null };
+
+  it('cliente genera código exitosamente', async () => {
+    prisma.booking.findUnique.mockResolvedValue(reservaConfirmada);
+    prisma.booking.update.mockResolvedValue({ ...reservaConfirmada, startCode: '123456' });
+
+    const res = await request(app)
+      .post('/bookings/booking-001/generate-code')
+      .set('Authorization', `Bearer ${tokenCliente()}`);
+
+    expect(res.statusCode).toBe(200);
+    expect(res.body.startCode).toMatch(/^\d{6}$/);
+    expect(res.body.expiraEn).toBeDefined();
+  });
+
+  it('proveedor NO puede generar código (403)', async () => {
+    const res = await request(app)
+      .post('/bookings/booking-001/generate-code')
+      .set('Authorization', `Bearer ${tokenProveedor()}`);
+
+    expect(res.statusCode).toBe(403);
+    expect(res.body.error).toMatch(/cliente/);
+  });
+
+  it('falla si reserva no está CONFIRMADA (400)', async () => {
+    prisma.booking.findUnique.mockResolvedValue({ ...reservaBase, estado: 'PENDIENTE', startCodeUsedAt: null });
+
+    const res = await request(app)
+      .post('/bookings/booking-001/generate-code')
+      .set('Authorization', `Bearer ${tokenCliente()}`);
+
+    expect(res.statusCode).toBe(400);
+    expect(res.body.error).toMatch(/CONFIRMADA/);
+  });
+
+  it('falla si servicio ya fue iniciado (400)', async () => {
+    prisma.booking.findUnique.mockResolvedValue({ ...reservaConfirmada, startCodeUsedAt: new Date() });
+
+    const res = await request(app)
+      .post('/bookings/booking-001/generate-code')
+      .set('Authorization', `Bearer ${tokenCliente()}`);
+
+    expect(res.statusCode).toBe(400);
+    expect(res.body.error).toMatch(/ya fue iniciado/);
+  });
+
+  it('falla si la reserva es ajena (403)', async () => {
+    const otroToken = jwt.sign({ id: 'otro-999', email: 'otro@test.com', rol: 'CLIENTE' }, SECRET, { expiresIn: '1h' });
+    prisma.booking.findUnique.mockResolvedValue(reservaConfirmada); // clienteId = 'cliente-001'
+
+    const res = await request(app)
+      .post('/bookings/booking-001/generate-code')
+      .set('Authorization', `Bearer ${otroToken}`);
+
+    expect(res.statusCode).toBe(403);
+  });
+
+  it('devuelve 404 si reserva no existe', async () => {
+    prisma.booking.findUnique.mockResolvedValue(null);
+
+    const res = await request(app)
+      .post('/bookings/no-existe/generate-code')
+      .set('Authorization', `Bearer ${tokenCliente()}`);
+
+    expect(res.statusCode).toBe(404);
+  });
+});
+
+// ============================================================
+describe('POST /bookings/:id/verify-code — verificar código de inicio', () => {
+// ============================================================
+
+  const codeExpiry = new Date(Date.now() + 20 * 60 * 1000); // 20 min from now
+  const reservaConCodigo = {
+    ...reservaBase,
+    estado: 'CONFIRMADO',
+    startCode: '654321',
+    startCodeExpiry: codeExpiry,
+    startCodeAttempts: 0,
+    startCodeUsedAt: null,
+    cliente: { id: 'cliente-001', nombre: 'Juan Prueba', email: 'juan@test.com' },
+    proveedor: {
+      id: 'profile-proveedor-001',
+      userId: 'proveedor-001',
+      user: { nombre: 'Carlos Plomero', email: 'carlos@test.com' },
+    },
+  };
+
+  it('proveedor verifica código correcto → EN_PROGRESO', async () => {
+    prisma.providerProfile.findUnique.mockResolvedValue(perfilProveedor);
+    prisma.booking.findUnique.mockResolvedValue(reservaConCodigo);
+    prisma.booking.update.mockResolvedValue({ ...reservaConCodigo, estado: 'EN_PROGRESO' });
+
+    const res = await request(app)
+      .post('/bookings/booking-001/verify-code')
+      .set('Authorization', `Bearer ${tokenProveedor()}`)
+      .send({ code: '654321' });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.body.booking.estado).toBe('EN_PROGRESO');
+  });
+
+  it('código incorrecto devuelve 400 con intentos restantes', async () => {
+    prisma.providerProfile.findUnique.mockResolvedValue(perfilProveedor);
+    prisma.booking.findUnique.mockResolvedValue(reservaConCodigo);
+    prisma.booking.update.mockResolvedValue({ ...reservaConCodigo, startCodeAttempts: 1 });
+
+    const res = await request(app)
+      .post('/bookings/booking-001/verify-code')
+      .set('Authorization', `Bearer ${tokenProveedor()}`)
+      .send({ code: '000000' });
+
+    expect(res.statusCode).toBe(400);
+    expect(res.body.error).toMatch(/incorrecto/);
+    expect(res.body.intentosRestantes).toBe(2);
+  });
+
+  it('bloquea después de 3 intentos fallidos (429)', async () => {
+    prisma.providerProfile.findUnique.mockResolvedValue(perfilProveedor);
+    prisma.booking.findUnique.mockResolvedValue({ ...reservaConCodigo, startCodeAttempts: 3 });
+
+    const res = await request(app)
+      .post('/bookings/booking-001/verify-code')
+      .set('Authorization', `Bearer ${tokenProveedor()}`)
+      .send({ code: '000000' });
+
+    expect(res.statusCode).toBe(429);
+    expect(res.body.error).toMatch(/nuevo código/);
+  });
+
+  it('código expirado devuelve 400', async () => {
+    prisma.providerProfile.findUnique.mockResolvedValue(perfilProveedor);
+    const expirado = new Date(Date.now() - 1000); // 1s in the past
+    prisma.booking.findUnique.mockResolvedValue({ ...reservaConCodigo, startCodeExpiry: expirado });
+
+    const res = await request(app)
+      .post('/bookings/booking-001/verify-code')
+      .set('Authorization', `Bearer ${tokenProveedor()}`)
+      .send({ code: '654321' });
+
+    expect(res.statusCode).toBe(400);
+    expect(res.body.error).toMatch(/expirado/);
+  });
+
+  it('falla si cliente no generó código aún (400)', async () => {
+    prisma.providerProfile.findUnique.mockResolvedValue(perfilProveedor);
+    prisma.booking.findUnique.mockResolvedValue({ ...reservaConCodigo, startCode: null });
+
+    const res = await request(app)
+      .post('/bookings/booking-001/verify-code')
+      .set('Authorization', `Bearer ${tokenProveedor()}`)
+      .send({ code: '654321' });
+
+    expect(res.statusCode).toBe(400);
+    expect(res.body.error).toMatch(/aún no ha generado/);
+  });
+
+  it('falla si servicio ya fue iniciado (400)', async () => {
+    prisma.providerProfile.findUnique.mockResolvedValue(perfilProveedor);
+    prisma.booking.findUnique.mockResolvedValue({ ...reservaConCodigo, startCodeUsedAt: new Date() });
+
+    const res = await request(app)
+      .post('/bookings/booking-001/verify-code')
+      .set('Authorization', `Bearer ${tokenProveedor()}`)
+      .send({ code: '654321' });
+
+    expect(res.statusCode).toBe(400);
+    expect(res.body.error).toMatch(/ya fue iniciado/);
+  });
+
+  it('cliente NO puede verificar código (403)', async () => {
+    const res = await request(app)
+      .post('/bookings/booking-001/verify-code')
+      .set('Authorization', `Bearer ${tokenCliente()}`)
+      .send({ code: '654321' });
+
+    expect(res.statusCode).toBe(403);
+    expect(res.body.error).toMatch(/proveedor/);
+  });
+
+  it('proveedor ajeno no puede verificar (403)', async () => {
+    const otroProveedor = jwt.sign({ id: 'otro-proveedor-999', email: 'otro@test.com', rol: 'PROVEEDOR' }, SECRET, { expiresIn: '1h' });
+    prisma.providerProfile.findUnique.mockResolvedValue({ ...perfilProveedor, id: 'otro-profile-999', userId: 'otro-proveedor-999' });
+    prisma.booking.findUnique.mockResolvedValue(reservaConCodigo); // proveedorId = 'profile-proveedor-001'
+
+    const res = await request(app)
+      .post('/bookings/booking-001/verify-code')
+      .set('Authorization', `Bearer ${otroProveedor}`)
+      .send({ code: '654321' });
+
+    expect(res.statusCode).toBe(403);
+  });
+
+  it('falla sin código en body (400)', async () => {
+    prisma.providerProfile.findUnique.mockResolvedValue(perfilProveedor);
+    prisma.booking.findUnique.mockResolvedValue(reservaConCodigo);
+
+    const res = await request(app)
+      .post('/bookings/booking-001/verify-code')
+      .set('Authorization', `Bearer ${tokenProveedor()}`)
+      .send({});
+
+    expect(res.statusCode).toBe(400);
+    expect(res.body.error).toMatch(/requerido/);
   });
 });
