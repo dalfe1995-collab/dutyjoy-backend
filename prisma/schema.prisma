@@ -3,9 +3,8 @@ generator client {
 }
 
 datasource db {
-  provider  = "postgresql"
-  url       = env("DATABASE_URL")
-  directUrl = env("DIRECT_URL")
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
 }
 
 model User {
@@ -27,6 +26,12 @@ model User {
   referredById      String?            // userId of referrer
   referredBy        User?     @relation("Referrals", fields: [referredById], references: [id])
   referrals         User[]    @relation("Referrals")
+  // UTM attribution — captured at registration
+  utmSource         String?   // e.g. "facebook", "google", "tiktok", "whatsapp"
+  utmMedium         String?   // e.g. "cpc", "social", "email", "organic"
+  utmCampaign       String?   // e.g. "spring_2025", "referidos_x2"
+  utmContent        String?   // e.g. "banner_v1", "story_15s"
+  utmTerm           String?   // keyword (Google Ads)
   createdAt         DateTime  @default(now())
   updatedAt         DateTime  @updatedAt
 
@@ -40,6 +45,7 @@ model User {
   mensajesEnviados      MensajeChat[] @relation("MensajesEnviados")
   tagAsignaciones       CrmTagAsignacion[]
   pushSubscriptions     PushSubscription[]
+  loyaltyAccount        LoyaltyAccount?
 }
 
 model Notificacion {
@@ -61,6 +67,19 @@ enum Rol {
   CLIENTE
   PROVEEDOR
   ADMIN
+}
+
+model ProviderUnavailability {
+  id          String          @id @default(cuid())
+  providerId  String
+  provider    ProviderProfile @relation(fields: [providerId], references: [id], onDelete: Cascade)
+  fechaInicio DateTime
+  fechaFin    DateTime
+  motivo      String?         // "vacaciones" | "enfermedad" | "otro"
+  createdAt   DateTime        @default(now())
+
+  @@index([providerId, fechaInicio])
+  @@index([fechaInicio, fechaFin])
 }
 
 model ProviderProfile {
@@ -95,12 +114,287 @@ model ProviderProfile {
   voiceOnboardingAt DateTime? // timestamp when voice interview was completed
   // ── Service packages ─────────────────────────────────────────────────────
   paquetes          Json?     // [{id,nombre,descripcion,precio,duracionHoras,incluye}]
+  // ── Cobros / payout info ─────────────────────────────────────────────────
+  metodoCobro       String?   // Nequi | Daviplata | Bancolombia | Davivienda | Nequi | PSE
+  numeroCobro       String?   // phone number or account number
+  titularCobro      String?   // account holder name (may differ from user.nombre)
+  bancoCobro        String?   // bank name if metodoCobro is bank account
+  tipoCuentaCobro   String?   // AHORROS | CORRIENTE
   createdAt         DateTime  @default(now())
 
-  bookings   Booking[]
-  reviews    Review[]
-  favoritos  Favorito[]
-  location   ProviderLocation?
+  bookings       Booking[]
+  reviews        Review[]
+  favoritos      Favorito[]
+  location       ProviderLocation?
+  pagos          Pago[]
+  unavailability ProviderUnavailability[]
+}
+
+// ── Project Management ────────────────────────────────────────────────────
+model Project {
+  id          String   @id @default(cuid())
+  nombre      String
+  descripcion String?
+  estado      String   @default("planificacion") // planificacion | activo | pausado | completado | cancelado
+  prioridad   String   @default("media")         // critica | alta | media | baja
+  tipo        String   @default("interno")       // interno | producto | cliente | infraestructura | investigacion
+  fechaInicio DateTime?
+  fechaFin    DateTime?
+  presupuesto Float?
+  progreso    Int      @default(0)               // 0-100 auto-calculated from tasks
+  owner       String?
+  equipo      String[]
+  tags        String[]
+  color       String   @default("#0ABFBC")
+  aiPlan      Json?    // full AI-generated project plan
+  aiRisks     Json?    // AI risk register
+  aiSummary   String?  // latest AI status summary
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  tasks      ProjectTask[]
+  milestones ProjectMilestone[]
+  comments   ProjectComment[]
+
+  @@index([estado, prioridad])
+}
+
+model ProjectTask {
+  id           String   @id @default(cuid())
+  projectId    String
+  project      Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  titulo       String
+  descripcion  String?
+  columna      String   @default("backlog") // backlog | todo | in_progress | review | done | blocked
+  prioridad    String   @default("media")
+  asignado     String?
+  puntos       Int?     // story points
+  etiquetas    String[]
+  fechaVence   DateTime?
+  estimacion   String?  // AI-estimated effort string
+  subtareas    Json?    // [{id, texto, done}]
+  dependencias String[] // other task IDs
+  aiNotas      String?
+  orden        Int      @default(0)
+  bloqueadoPor String?  // reason why blocked
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@index([projectId, columna])
+  @@index([asignado])
+}
+
+model ProjectMilestone {
+  id          String   @id @default(cuid())
+  projectId   String
+  project     Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  nombre      String
+  fecha       DateTime
+  estado      String   @default("pendiente") // pendiente | en_riesgo | completado
+  descripcion String?
+  createdAt   DateTime @default(now())
+
+  @@index([projectId])
+}
+
+model ProjectComment {
+  id        String   @id @default(cuid())
+  projectId String
+  project   Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  autor     String
+  contenido String
+  tipo      String   @default("comentario") // comentario | decision | blocker | ai_insight
+  createdAt DateTime @default(now())
+}
+
+// ── HR Models ─────────────────────────────────────────────────────────────
+model Employee {
+  id          String   @id @default(cuid())
+  nombre      String
+  email       String   @unique
+  cargo       String
+  dept        String
+  tipo        String   @default("TIEMPO_COMPLETO") // TIEMPO_COMPLETO | MEDIO_TIEMPO | CONTRATISTA | PASANTE
+  salario     Float    @default(0)
+  estado      String   @default("ACTIVO") // ACTIVO | INACTIVO | LICENCIA
+  inicio      DateTime @default(now())
+  performance String?  // EXCELENTE | BUENO | REGULAR | BAJO
+  skills      String[]
+  vacaciones  Int      @default(15)
+  telefono    String?
+  foto        String?
+  nivelSalarial String? // junior | mid | senior | lead | director
+  reportaA    String?  // Employee.id
+  notas       String?  // private HR notes
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  reviews     PerformanceReview[]
+  ptoRequests PtoRequest[]
+
+  @@index([dept, estado])
+}
+
+model JobPosition {
+  id          String   @id @default(cuid())
+  cargo       String
+  dept        String
+  prioridad   String   @default("MEDIA") // ALTA | MEDIA | BAJA
+  estado      String   @default("ABIERTA") // ABIERTA | SCREENING | ENTREVISTAS | OFERTA | CERRADA
+  descripcion String?
+  requisitos  String[]
+  salarioMin  Float?
+  salarioMax  Float?
+  ubicacion   String   @default("Remoto/Ibagué")
+  aiBrief     Json?    // full AI-generated JD {resumen, responsabilidades, requisitos, beneficios}
+  aiQuestions Json?    // AI interview questions per stage
+  candidatos  Int      @default(0)
+  publicadaEn String[] // ["LinkedIn","Computrabajo","HojaDeVida"]
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+model PerformanceReview {
+  id           String   @id @default(cuid())
+  employeeId   String
+  employee     Employee @relation(fields: [employeeId], references: [id])
+  periodo      String   // "2025-Q2"
+  tipo         String   @default("trimestral") // trimestral | anual | pip | 360
+  score        String?  // EXCELENTE | BUENO | REGULAR | BAJO
+  metasAlcanzadas Float?
+  fortalezas   String?
+  areasMejora  String?
+  comentario   String?
+  aiBorrador   String?  // AI-generated draft
+  revisorNombre String?
+  estado       String   @default("borrador") // borrador | completada | firmada
+  createdAt    DateTime @default(now())
+}
+
+model PtoRequest {
+  id         String   @id @default(cuid())
+  employeeId String
+  employee   Employee @relation(fields: [employeeId], references: [id])
+  tipo       String   // VACACIONES | LICENCIA | INCAPACIDAD | PERMISO
+  desde      DateTime
+  hasta      DateTime
+  dias       Int
+  motivo     String?
+  estado     String   @default("PENDIENTE") // PENDIENTE | APROBADA | RECHAZADA
+  aprobadoPor String?
+  createdAt  DateTime @default(now())
+
+  @@index([employeeId, estado])
+}
+
+model HrPulse {
+  id        String   @id @default(cuid())
+  titulo    String
+  preguntas Json     // [{id, texto, tipo:"escala|texto|opcion", opciones?:[]}]
+  respuestas Json?   // [{empleadoId, respuestas:[{id, valor}], createdAt}]
+  analisis  String?  // AI narrative
+  score     Float?   // 0-10 overall score
+  temas     Json?    // [{tema, sentimiento, menciones}]
+  estado    String   @default("borrador") // borrador | enviada | cerrada
+  createdAt DateTime @default(now())
+}
+
+// ── Ad Campaigns (cross-platform tracker) ─────────────────────────────────
+model AdCampaign {
+  id           String   @id @default(cuid())
+  nombre       String
+  plataforma   String   // meta | google | tiktok | multi
+  objetivo     String   // awareness | trafico | conversiones | leads
+  estado       String   @default("borrador") // borrador | activa | pausada | terminada | error
+  externalId   String?  // platform campaign ID returned by API
+  presupuestoTotal Float @default(0)
+  presupuestoDiario Float?
+  gastado      Float    @default(0)
+  impresiones  Int      @default(0)
+  clicks       Int      @default(0)
+  conversiones Int      @default(0)
+  cpa          Float?
+  ctr          Float?
+  roas         Float?
+  aiScore      Int?     // 0-100 AI health score
+  aiNotas      String?  // latest AI observation
+  copy         Json?    // { facebook, instagram, tiktok, google, whatsapp }
+  targeting    Json?    // { edad, genero, ciudades, intereses }
+  creativos    Json?    // { imagenes, videos }
+  metadata     Json?    // raw platform response
+  startDate    DateTime?
+  endDate      DateTime?
+  creadoPorIA  Boolean  @default(false)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+  automations  AdAutomationLog[]
+
+  @@index([plataforma, estado])
+  @@index([createdAt(sort: Desc)])
+}
+
+// ── Automation rules ───────────────────────────────────────────────────────
+model AdAutomation {
+  id          String   @id @default(cuid())
+  nombre      String
+  activa      Boolean  @default(true)
+  plataforma  String   @default("todas") // meta | google | tiktok | todas
+  condicion   String   // cpa_mayor | ctr_menor | roas_menor | gasto_diario_mayor | impresiones_bajas
+  valor       Float
+  accion      String   // pausar | activar | aumentar_presupuesto | reducir_presupuesto | alertar
+  parametro   Float?   // extra param (e.g. % change)
+  disparos    Int      @default(0)
+  ultimoDisparo DateTime?
+  createdAt   DateTime @default(now())
+  logs        AdAutomationLog[]
+}
+
+model AdAutomationLog {
+  id           String       @id @default(cuid())
+  automationId String
+  automation   AdAutomation @relation(fields: [automationId], references: [id], onDelete: Cascade)
+  campaignId   String?
+  campaign     AdCampaign?  @relation(fields: [campaignId], references: [id], onDelete: SetNull)
+  accionTomada String
+  detalles     String?
+  createdAt    DateTime     @default(now())
+}
+
+// ── Payment records ────────────────────────────────────────────────────────
+model Pago {
+  id           String     @id @default(cuid())
+  bookingId    String
+  booking      Booking    @relation(fields: [bookingId], references: [id])
+  proveedorId  String?
+  proveedor    ProviderProfile? @relation(fields: [proveedorId], references: [id])
+  tipo         TipoPago
+  monto        Float      // amount in COP
+  estado       EstadoPago @default(PENDIENTE)
+  referencia   String?    // MercadoPago payment ID or bank transfer ref
+  metodo       String?    // Nequi, Daviplata, Bancolombia, etc.
+  notas        String?
+  procesadoPor String?    // admin userId who processed the payout
+  fechaPago    DateTime?  // when the money actually moved
+  createdAt    DateTime   @default(now())
+  updatedAt    DateTime   @updatedAt
+
+  @@index([bookingId])
+  @@index([tipo, estado])
+  @@index([proveedorId, estado])
+}
+
+enum TipoPago {
+  CLIENTE_RECIBIDO     // Payment received from client via MercadoPago
+  PROVEEDOR_PENDIENTE  // Money owed to provider (booking completed, dispute window open)
+  PROVEEDOR_PAGADO     // Money sent to provider (85% of booking total)
+  REEMBOLSO_CLIENTE    // Refund to client (dispute won by client)
+}
+
+enum EstadoPago {
+  PENDIENTE
+  EN_PROCESO
+  COMPLETADO
+  FALLIDO
 }
 
 model ProviderLocation {
@@ -145,6 +439,7 @@ model Booking {
   review    Review?
   disputas  Disputa[]
   mensajes  MensajeChat[]
+  pagos     Pago[]
 }
 
 enum Recurrencia {
@@ -265,4 +560,131 @@ model PushSubscription {
   createdAt DateTime @default(now())
 
   @@index([userId])
+}
+
+// ── Loyalty / Puntos ─────────────────────────────────────────────────────
+model LoyaltyAccount {
+  id             String   @id @default(cuid())
+  userId         String   @unique
+  user           User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  puntos         Int      @default(0)
+  nivel          String   @default("bronce") // bronce|plata|oro|platino
+  totalGanados   Int      @default(0)
+  totalCanjeados Int      @default(0)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  transacciones  LoyaltyTransaction[]
+
+  @@index([userId])
+  @@index([nivel])
+}
+
+model LoyaltyTransaction {
+  id          String         @id @default(cuid())
+  accountId   String
+  account     LoyaltyAccount @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  puntos      Int
+  tipo        String         // booking_completado|resena|referido|primera_reserva|canjeado|bonus|recurrencia
+  descripcion String?
+  bookingId   String?
+  cuponId     String?
+  createdAt   DateTime       @default(now())
+
+  @@index([accountId, createdAt(sort: Desc)])
+}
+
+// ── Coupons ───────────────────────────────────────────────────────────────
+model Cupon {
+  id          String   @id @default(cuid())
+  codigo      String   @unique
+  tipo        String   @default("porcentaje") // porcentaje | fijo
+  valor       Float
+  descripcion String?
+  activo      Boolean  @default(true)
+  usos        Int      @default(0)
+  maxUsos     Int?
+  montoMinimo Float?
+  expira      DateTime?
+  creadoPor   String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([codigo])
+  @@index([activo])
+}
+
+// ── Automation Engine ─────────────────────────────────────────────────────
+model AutomationRule {
+  id          String   @id @default(cuid())
+  nombre      String
+  descripcion String?
+  activa      Boolean  @default(true)
+  tipo        String   // churn_prevention|quality_coaching|review_request|no_show_prevention|client_reactivation|fraud_quarantine|dispute_prevention|provider_welcome|revenue_anomaly|sla_escalation
+  categoria   String   @default("operacional") // operacional|retencion|calidad|fraude|financiero
+  trigger     Json     // { evento, condicion, umbral }
+  accion      Json     // { tipo, payload, canal }
+  schedule    String   @default("diario")      // diario|cada_hora|semanal|evento
+  ejecuciones Int      @default(0)
+  exitos      Int      @default(0)
+  errores     Int      @default(0)
+  afectados   Int      @default(0)
+  ultimaEjecucion   DateTime?
+  proximaEjecucion  DateTime?
+  creadoPorIA Boolean  @default(false)
+  aiRationale String?  // why AI suggested this
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  logs AutomationLog[]
+
+  @@index([activa, tipo])
+  @@index([categoria])
+}
+
+model AutomationLog {
+  id          String         @id @default(cuid())
+  ruleId      String
+  rule        AutomationRule @relation(fields: [ruleId], references: [id], onDelete: Cascade)
+  estado      String         @default("exitoso") // exitoso|fallido|saltado|parcial
+  afectados   Int            @default(0)
+  detalles    Json?
+  error       String?
+  duracionMs  Int?
+  createdAt   DateTime       @default(now())
+
+  @@index([ruleId, createdAt(sort: Desc)])
+  @@index([createdAt(sort: Desc)])
+}
+
+// ── Security: Audit Trail ─────────────────────────────────────────────────
+model AuditLog {
+  id           String   @id @default(cuid())
+  userId       String?  // who did it (null = system/webhook)
+  accion       String   // "user_role_change" | "pago_procesado" | "booking_cancelado" | "admin_login" | ...
+  entidad      String?  // "User" | "Booking" | "Pago" | ...
+  entidadId    String?  // the affected record id
+  valorAntes   Json?    // old value snapshot
+  valorDespues Json?    // new value snapshot
+  ip           String?
+  userAgent    String?
+  createdAt    DateTime @default(now())
+
+  @@index([userId, createdAt(sort: Desc)])
+  @@index([accion, createdAt(sort: Desc)])
+  @@index([entidad, entidadId])
+  @@index([createdAt(sort: Desc)])
+}
+
+// ── Security: Login Attempts (brute-force tracking) ───────────────────────
+model LoginAttempt {
+  id        String   @id @default(cuid())
+  email     String
+  ip        String
+  exitoso   Boolean  @default(false)
+  userAgent String?
+  createdAt DateTime @default(now())
+
+  @@index([email, createdAt(sort: Desc)])
+  @@index([ip, createdAt(sort: Desc)])
 }
