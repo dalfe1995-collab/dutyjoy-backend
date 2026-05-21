@@ -9,6 +9,11 @@ const { sendPush } = require('../lib/push');
 
 const openai = process.env.OPENAI_API_KEY ? new OpenAI({ apiKey: process.env.OPENAI_API_KEY }) : null;
 
+// Lazy-load to avoid circular dep (payments imports prisma, bookings imports payments)
+function getCreateProviderPayout() {
+  return require('./payments.routes').createProviderPayout;
+}
+
 // ── Helpers ───────────────────────────────────────────────────────────
 function formatFecha(date) {
   return new Date(date).toLocaleDateString('es-CO', {
@@ -52,6 +57,27 @@ router.post('/', verifyToken, async (req, res) => {
     // Validar que el servicio solicitado esté en el catálogo del proveedor
     if (proveedor.servicios?.length > 0 && !proveedor.servicios.includes(tipoServicio)) {
       return res.status(400).json({ error: `El proveedor no ofrece el servicio "${tipoServicio}"` });
+    }
+
+    // Check provider hasn't blocked this date
+    const unavailable = await prisma.providerUnavailability.findFirst({
+      where: {
+        providerId:  proveedor.id,
+        fechaInicio: { lte: fechaDate },
+        fechaFin:    { gte: fechaDate },
+      },
+    });
+    if (unavailable) {
+      return res.status(409).json({ error: 'El proveedor no está disponible en esa fecha. Por favor elige otra fecha.', code: 'PROVIDER_UNAVAILABLE' });
+    }
+
+    // Anti-spam: max 5 booking requests per client per day
+    const hoy = new Date(); hoy.setHours(0, 0, 0, 0);
+    const reservasHoy = await prisma.booking.count({
+      where: { clienteId: req.user.id, createdAt: { gte: hoy } },
+    });
+    if (reservasHoy >= 5) {
+      return res.status(429).json({ error: 'Máximo 5 reservas por día. Intenta mañana.', code: 'BOOKING_DAILY_LIMIT' });
     }
 
     const horas          = parseFloat(duracionHoras) || 2;
@@ -386,6 +412,8 @@ router.patch('/:id/status', verifyToken, async (req, res) => {
         precioTotal:     booking.precioTotal,
         comision:        booking.comisionDutyJoy,
       });
+      // Create 48h-window payout record for provider
+      getCreateProviderPayout()(req.params.id).catch(e => console.error('[payout]', e.message));
     }
 
     if (estado === 'CANCELADO') {
@@ -758,6 +786,66 @@ router.post('/:id/verify-code', verifyToken, async (req, res) => {
   } catch (e) {
     console.error('[verify-code]', e);
     res.status(500).json({ error: 'Error al verificar el código' });
+  }
+});
+
+// ── GET /bookings/export — download provider bookings as CSV (for tax/accounting) ──
+router.get('/export', verifyToken, async (req, res) => {
+  try {
+    if (!['PROVEEDOR', 'ADMIN'].includes(req.user.rol)) {
+      return res.status(403).json({ error: 'Solo proveedores y admins pueden exportar' });
+    }
+
+    const { desde, hasta, estado } = req.query;
+    const where = req.user.rol === 'PROVEEDOR'
+      ? { proveedor: { userId: req.user.id } }
+      : {};
+
+    if (desde) where.fechaServicio = { ...where.fechaServicio, gte: new Date(desde) };
+    if (hasta) where.fechaServicio = { ...where.fechaServicio, lte: new Date(hasta) };
+    if (estado) where.estado = estado;
+
+    const bookings = await prisma.booking.findMany({
+      where,
+      orderBy: { fechaServicio: 'desc' },
+      take: 1000,
+      select: {
+        id: true, tipoServicio: true, estado: true, fechaServicio: true,
+        duracionHoras: true, precioTotal: true, comisionDutyJoy: true,
+        recurrencia: true, createdAt: true,
+        cliente:   { select: { nombre: true, email: true } },
+        proveedor: { select: { user: { select: { nombre: true } } } },
+      },
+    });
+
+    // Build CSV
+    const headers = ['ID','Servicio','Estado','Fecha','Horas','Precio','Comision DutyJoy','Neto Proveedor','Recurrencia','Cliente','Email Cliente','Proveedor','Creado'];
+    const rows = bookings.map(b => [
+      b.id.slice(-8).toUpperCase(),
+      b.tipoServicio,
+      b.estado,
+      new Date(b.fechaServicio).toISOString().split('T')[0],
+      b.duracionHoras,
+      b.precioTotal,
+      b.comisionDutyJoy,
+      (b.precioTotal - b.comisionDutyJoy).toFixed(0),
+      b.recurrencia,
+      b.cliente.nombre,
+      b.cliente.email,
+      b.proveedor?.user?.nombre || '',
+      new Date(b.createdAt).toISOString().split('T')[0],
+    ].map(v => `"${String(v).replace(/"/g, '""')}"`).join(','));
+
+    const csv = [headers.join(','), ...rows].join('\n');
+    const filename = `dutyjoy-bookings-${new Date().toISOString().slice(0,10)}.csv`;
+
+    res.set('Content-Type', 'text/csv; charset=utf-8');
+    res.set('Content-Disposition', `attachment; filename="${filename}"`);
+    res.set('Cache-Control', 'no-store');
+    res.send('﻿' + csv); // BOM for Excel UTF-8 compatibility
+  } catch (e) {
+    console.error('[export]', e);
+    res.status(500).json({ error: 'Error al exportar' });
   }
 });
 

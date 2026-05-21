@@ -2,6 +2,8 @@ const router      = require('express').Router();
 const verifyToken = require('../middleware/verifyToken');
 const prisma      = require('../lib/prisma');
 const { sendPush } = require('../lib/push');
+const OpenAI = require('openai');
+const openai = process.env.OPENAI_API_KEY ? new OpenAI({ apiKey: process.env.OPENAI_API_KEY }) : null;
 
 /* ── Contact-info detection ─────────────────────────────────────────────────
    Detects Colombian phone numbers, WhatsApp links, emails, Telegram, etc.
@@ -272,6 +274,113 @@ router.delete('/:bookingId/:msgId', verifyToken, async (req, res) => {
     await prisma.mensajeChat.delete({ where: { id: req.params.msgId } });
     res.json({ ok: true });
   } catch (e) { res.status(500).json({ error: 'Error al eliminar mensaje' }); }
+});
+
+/* ── POST /messages/:bookingId/ai-suggestions ───────────────────────────────
+   Returns 3 context-aware smart reply suggestions for the current user's role.
+   Analyzes recent conversation + booking details.
+────────────────────────────────────────────────────────────────────────── */
+router.post('/:bookingId/ai-suggestions', verifyToken, async (req, res) => {
+  if (!openai) return res.json({ suggestions: [] });
+  try {
+    const booking = await prisma.booking.findUnique({
+      where: { id: req.params.bookingId },
+      select: {
+        tipoServicio: true, estado: true, fechaServicio: true,
+        precioTotal: true, descripcion: true,
+        cliente:   { select: { nombre: true, id: true } },
+        proveedor: { include: { user: { select: { nombre: true, id: true } } } },
+      },
+    });
+    if (!booking) return res.status(404).json({ error: 'Reserva no encontrada' });
+
+    // Last 6 messages for context
+    const msgs = await prisma.mensajeChat.findMany({
+      where: { bookingId: req.params.bookingId },
+      include: { autor: { select: { nombre: true, rol: true } } },
+      orderBy: { createdAt: 'desc' },
+      take: 6,
+    });
+
+    const isProveedor  = req.user?.rol === 'PROVEEDOR';
+    const rol          = isProveedor ? 'PROVEEDOR' : 'CLIENTE';
+    const horasHastaServicio = (new Date(booking.fechaServicio) - Date.now()) / 3_600_000;
+    const conversation = msgs.reverse().map(m => `${m.autor.nombre} (${m.autor.rol}): ${m.contenido}`).join('\n');
+
+    const r = await openai.chat.completions.create({
+      model: 'gpt-4o-mini',
+      max_tokens: 300,
+      temperature: 0.7,
+      response_format: { type: 'json_object' },
+      messages: [{
+        role: 'user',
+        content: `Eres el asistente de chat de DutyJoy Colombia (marketplace servicios del hogar).
+Sugiere 3 respuestas cortas y naturales para el ${rol} en esta conversación de servicio.
+
+SERVICIO: ${booking.tipoServicio} | Estado: ${booking.estado} | En: ${horasHastaServicio > 0 ? Math.round(horasHastaServicio) + 'h' : 'ya pasó'}
+Descripción: ${booking.descripcion || 'sin descripción'}
+${conversation ? `\nCONVERSACIÓN RECIENTE:\n${conversation}` : '\n(Sin mensajes aún)'}
+
+ROL DEL USUARIO: ${rol}
+
+Devuelve JSON: { "suggestions": ["sugerencia 1", "sugerencia 2", "sugerencia 3"] }
+Máximo 60 caracteres por sugerencia. En español colombiano natural. Apropiadas para el contexto actual.`,
+      }],
+    });
+    const data = JSON.parse(r.choices[0].message.content);
+    res.json({ suggestions: data.suggestions || [] });
+  } catch { res.json({ suggestions: [] }); }
+});
+
+/* ── GET /messages/:bookingId/checklist ─────────────────────────────────────
+   Returns a service preparation checklist for provider/client based on service type.
+────────────────────────────────────────────────────────────────────────── */
+const CHECKLISTS = {
+  proveedor: {
+    limpieza:     ['🧹 Escoba y trapero','🪣 Balde y trapero húmedo','🧴 Jabón multiusos y desengrasante','🧽 Esponjas y estropajos','🧻 Papel absorbente','💧 Agua para mezclas','🪟 Limpiador de vidrios','🗑️ Bolsas de basura','🧤 Guantes de protección','👕 Ropa de trabajo'],
+    plomeria:     ['🔧 Llave de tubo y ajustable','🔩 Juego de destornilladores','⚙️ Teflón y sellante de tuberías','🪣 Balde para derrames','💡 Linterna','📐 Cinta métrica','🔴 Tornillos y tuercas variados','🧰 Caja de herramientas completa'],
+    electricidad: ['⚡ Probador de voltaje / multímetro','🔌 Cinta aislante','🔦 Linterna','🔩 Destornilladores aislados','🔧 Pelacables','⚡ Breakers de repuesto (varios amperajes)','📐 Nivel','🧤 Guantes aislantes','⚠️ Conos de señalización'],
+    pintura:      ['🖌️ Rodillos y brochas variados','🪣 Bandejas para pintura','🎨 Pintura (según acordado)','📦 Plástico protector','🪜 Escalera','🧹 Espátula para masilla','📦 Masilla y lija','🧤 Guantes','😷 Mascarilla','👓 Gafas protectoras'],
+    jardineria:   ['✂️ Tijeras de poda y podadora','🪚 Sierra para ramas gruesas','🌱 Abono (si acordado)','🧤 Guantes de jardín','🪣 Regadera','🍂 Bolsas para desechos vegetales','🔨 Pala y rastrillo','💧 Manguera (verificar disponibilidad cliente)'],
+    carpinteria:  ['🔨 Martillo y clavos variados','🪚 Sierra manual/eléctrica','📐 Escuadra y nivel','✏️ Lápiz para trazos','🔩 Tornillos y tarugos','🔧 Taladro con brocas','🪜 Escalera','🧤 Guantes','😷 Mascarilla para polvo'],
+    cerrajeria:   ['🔑 Juego de llaves maestras','🔧 Destornilladores','🏠 Cerraduras de repuesto variadas','📐 Cinta métrica','💡 Linterna','🔩 Tornillos','🪛 Llave hexagonal'],
+    mudanzas:     ['📦 Cajas de cartón variadas','🎁 Plástico burbuja y papel periódico','🔧 Cinta de embalaje','🪛 Herramientas básicas para desmontar muebles','🧤 Guantes','🦺 Faja lumbar','📋 Lista de inventario'],
+    aires:        ['🔧 Llave de tubo y destornilladores','🧹 Cepillo para limpieza de filtros','💧 Agua y trapos limpios','📊 Manómetro de presión','🔌 Multímetro','🧤 Guantes','📦 Repuestos comunes (filtros, capacitores)'],
+    fumigacion:   ['🧪 Productos de fumigación certificados','💦 Bomba fumigadora','😷 Mascarilla certificada','👓 Gafas protectoras','🦺 Traje de protección','🧤 Guantes gruesos','⚠️ Señales de área fumigada'],
+    default:      ['🔧 Herramientas básicas','🧤 Guantes de protección','📋 Anota los detalles del trabajo','💡 Linterna','📱 Teléfono con carga completa'],
+  },
+  cliente: {
+    limpieza:     ['🚗 Asegúrate de estar en casa o dejar acceso','🗑️ Retira objetos valiosos de superficies','🐾 Aísla mascotas durante la limpieza','💧 Deja acceso a agua y electricidad','🗝️ Ten las llaves listas'],
+    plomeria:     ['🚰 Cierra la llave general del agua','🗑️ Despeja el área de trabajo','💧 Ten toallas y baldes disponibles','🗝️ Muéstrale el registro de agua','📍 Señala exactamente el problema'],
+    electricidad: ['⚡ Ubica el tablero eléctrico','🔌 Muéstrale qué circuitos están fallando','💡 Ten linternas por si cortan la luz','🗑️ Despeja el área de trabajo','⚠️ Avisa a la familia que puede haber cortes'],
+    pintura:      ['🛋️ Mueve muebles del área a pintar','🎨 Ten decidido el color','🖼️ Retira cuadros y decoraciones','💧 Ventila bien el espacio','🗑️ Protege el piso con plástico si el proveedor no trae'],
+    default:      ['🗝️ Ten las llaves listas','📍 Comparte la dirección exacta','💧 Deja acceso a agua y luz','📱 Mantén el teléfono activo','🐾 Aísla mascotas si tienes'],
+  },
+};
+
+router.get('/:bookingId/checklist', verifyToken, async (req, res) => {
+  try {
+    const booking = await prisma.booking.findUnique({
+      where: { id: req.params.bookingId },
+      select: { tipoServicio: true, estado: true },
+    });
+    if (!booking) return res.status(404).json({ error: 'No encontrado' });
+
+    const svc       = (booking.tipoServicio || '').toLowerCase().replace(/[^a-záéíóúñ]/gi, '');
+    const isProveedor = req.user?.rol === 'PROVEEDOR';
+
+    const items = isProveedor
+      ? {
+          proveedor: CHECKLISTS.proveedor[svc] || CHECKLISTS.proveedor.default,
+          cliente:   CHECKLISTS.cliente[svc]   || CHECKLISTS.cliente.default,
+        }
+      : { cliente: CHECKLISTS.cliente[svc] || CHECKLISTS.cliente.default };
+
+    const SVC_ICONS = { limpieza:'🧹', plomeria:'🔧', electricidad:'⚡', pintura:'🖌️', jardineria:'🌱', carpinteria:'🔨', cerrajeria:'🔑', mudanzas:'📦', aires:'❄️', fumigacion:'🪲' };
+    const icon = SVC_ICONS[svc] || '🛠️';
+
+    res.json({ items, tipoServicio: booking.tipoServicio, rol: req.user?.rol, icon, titulo: `Checklist: ${booking.tipoServicio}` });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 module.exports = router;

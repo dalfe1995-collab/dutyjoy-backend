@@ -3,6 +3,7 @@ const prisma = require('./prisma');
 const email  = require('./email');
 const { updateProviderEmbedding } = require('./embeddings');
 const { enviarReengagement, enviarDigestProveedor } = require('./emailPersonalizado');
+const { sendPush } = require('./push');
 const OpenAI = require('openai');
 const openai = process.env.OPENAI_API_KEY ? new OpenAI({ apiKey: process.env.OPENAI_API_KEY }) : null;
 
@@ -422,7 +423,27 @@ function iniciarCrons() {
     timezone: 'America/Bogota',
   });
 
-  console.log('⏰  Crons activos: recordatorio24h (:00) · expiracionReservas (:30) · autoCompletar (:45) · tiempoRespuesta (03:00) · tasaAceptacion (03:30) · recurrencias (07:00) · embeddings (02:00) · fraude (04:00) · onboarding (09:00) · reengagement (lun 10:00) · digest (lun 10:30)');
+  // Auditoría de seguridad — diariamente a las 01:00 AM
+  cron.schedule('0 1 * * *', auditarSeguridad, {
+    timezone: 'America/Bogota',
+  });
+
+  // Snapshot de salud de datos (backup check) — diariamente a las 01:30 AM
+  cron.schedule('30 1 * * *', snapshotSaludDatos, {
+    timezone: 'America/Bogota',
+  });
+
+  // Limpiar intentos de login antiguos (> 30 días) — diariamente a las 05:00 AM
+  cron.schedule('0 5 * * *', limpiarIntentosLogin, {
+    timezone: 'America/Bogota',
+  });
+
+  // Detección de anomalías en pagos — diariamente a las 06:00 AM
+  cron.schedule('0 6 * * *', detectarAnomaliasPagos, {
+    timezone: 'America/Bogota',
+  });
+
+  console.log('⏰  Crons activos: recordatorio24h (:00) · expiracionReservas (:30) · autoCompletar (:45) · tiempoRespuesta (03:00) · tasaAceptacion (03:30) · recurrencias (07:00) · embeddings (02:00) · fraude (04:00) · seguridad (01:00) · snapshot (01:30) · limpiezaLogins (05:00) · anomalias (06:00) · onboarding (09:00) · reengagement (lun 10:00) · digest (lun 10:30)');
 }
 
 /**
@@ -718,4 +739,186 @@ module.exports = {
   enviarReengagementSemanal,
   enviarDigestProveedoresSemanal,
   enviarNudgesOnboarding,
+  auditarSeguridad,
+  snapshotSaludDatos,
+  limpiarIntentosLogin,
+  detectarAnomaliasPagos,
 };
+
+// ── Security audit cron ───────────────────────────────────────────────────
+async function auditarSeguridad() {
+  try {
+    const hace24h = new Date(Date.now() - 24 * 60 * 60 * 1000);
+
+    const [fallidosRecientes, cuentasLocked] = await Promise.all([
+      prisma.$queryRaw`
+        SELECT email, ip, COUNT(*)::int as intentos
+        FROM "LoginAttempt"
+        WHERE exitoso = false AND "createdAt" > ${hace24h}
+        GROUP BY email, ip
+        HAVING COUNT(*) >= 5
+        ORDER BY intentos DESC
+        LIMIT 20
+      `,
+      prisma.$queryRaw`
+        SELECT email, COUNT(*)::int as intentos
+        FROM "LoginAttempt"
+        WHERE exitoso = false AND "createdAt" > ${hace24h}
+        GROUP BY email
+        HAVING COUNT(*) >= 10
+        ORDER BY intentos DESC
+        LIMIT 10
+      `,
+    ]);
+
+    if (cuentasLocked.length > 0) {
+      const emails = cuentasLocked.map(r => r.email).join(', ');
+      console.warn(`[SEGURIDAD] ATAQUE FUERZA BRUTA — Cuentas: ${emails}`);
+
+      // Push notification to all ADMIN users
+      const admins = await prisma.user.findMany({
+        where: { rol: 'ADMIN', activo: true },
+        select: { id: true },
+      });
+      for (const admin of admins) {
+        sendPush(admin.id, {
+          title: '🚨 Ataque de fuerza bruta detectado',
+          body:  `${cuentasLocked.length} cuenta(s) bajo ataque. Revisa CRM > Trust & Safety.`,
+          url:   '/crm/trust-safety',
+          tag:   'security-alert',
+        }).catch(() => {});
+      }
+    } else {
+      console.log('[SEGURIDAD] Sin anomalías de login en las últimas 24h');
+    }
+
+    if (fallidosRecientes.length > 0) {
+      console.warn(`[SEGURIDAD] ${fallidosRecientes.length} IP/email combos sospechosos en 24h`);
+    }
+  } catch (err) {
+    console.error('[CRON] auditarSeguridad error:', err.message);
+  }
+}
+
+// ── Payment anomaly detection ─────────────────────────────────────────────
+async function detectarAnomaliasPagos() {
+  try {
+    const hace7d = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+
+    // 1. Bookings with unusually high price (>3x provider average)
+    const pagosAltos = await prisma.$queryRaw`
+      SELECT b.id, b."precioTotal", b."proveedorId", b."clienteId",
+             avg_data.avg_precio, b."precioTotal" / NULLIF(avg_data.avg_precio, 0) as ratio
+      FROM "Booking" b
+      JOIN (
+        SELECT "proveedorId", AVG("precioTotal") as avg_precio
+        FROM "Booking" WHERE estado != 'CANCELADO'
+        GROUP BY "proveedorId"
+      ) avg_data ON avg_data."proveedorId" = b."proveedorId"
+      WHERE b."createdAt" > ${hace7d}
+        AND b."precioTotal" > avg_data.avg_precio * 3
+        AND avg_data.avg_precio > 0
+      LIMIT 10
+    `;
+
+    // 2. Same client booking same provider > 3 times in 7 days (coordinated review fraud risk)
+    const reservasRepetidas = await prisma.$queryRaw`
+      SELECT "clienteId", "proveedorId", COUNT(*)::int as total
+      FROM "Booking"
+      WHERE "createdAt" > ${hace7d}
+      GROUP BY "clienteId", "proveedorId"
+      HAVING COUNT(*) > 3
+      LIMIT 10
+    `;
+
+    // 3. Large payouts created today
+    const pagosGrandes = await prisma.pago.findMany({
+      where: {
+        tipo:      'PROVEEDOR_PENDIENTE',
+        createdAt: { gte: hace7d },
+        monto:     { gte: 500000 }, // ≥ $500k COP
+      },
+      select: { id: true, monto: true, proveedorId: true, bookingId: true, createdAt: true },
+      orderBy: { monto: 'desc' },
+      take: 10,
+    });
+
+    const anomalias = pagosAltos.length + reservasRepetidas.length;
+    if (anomalias > 0 || pagosGrandes.length > 0) {
+      console.warn(`[ANOMALIAS] Pagos altos: ${pagosAltos.length} | Reservas repetidas: ${reservasRepetidas.length} | Pagos grandes: ${pagosGrandes.length}`);
+
+      // Audit log
+      const { audit } = require('./audit');
+      audit({
+        accion:   'anomalia_detectada',
+        entidad:  'Sistema',
+        despues:  { pagosAltos: pagosAltos.length, reservasRepetidas: reservasRepetidas.length, pagosGrandes: pagosGrandes.length },
+      }).catch(() => {});
+
+      // Alert admins
+      if (anomalias > 2) {
+        const admins = await prisma.user.findMany({ where: { rol: 'ADMIN', activo: true }, select: { id: true } });
+        for (const admin of admins) {
+          sendPush(admin.id, {
+            title: '⚠️ Anomalías de pago detectadas',
+            body:  `${anomalias} patrones sospechosos. Revisa CRM > Trust & Safety.`,
+            url:   '/crm/trust-safety',
+            tag:   'payment-anomaly',
+          }).catch(() => {});
+        }
+      }
+    } else {
+      console.log('[ANOMALIAS] Sin anomalías de pago en los últimos 7 días');
+    }
+  } catch (err) {
+    console.error('[CRON] detectarAnomaliasPagos error:', err.message);
+  }
+}
+
+// ── Data health snapshot (backup check) ──────────────────────────────────
+async function snapshotSaludDatos() {
+  try {
+    const [usuarios, bookings, pagos, proveedores] = await Promise.all([
+      prisma.user.count(),
+      prisma.booking.count(),
+      prisma.pago.count(),
+      prisma.providerProfile.count(),
+    ]);
+
+    const snapshot = {
+      fecha: new Date().toISOString(),
+      usuarios, bookings, pagos, proveedores,
+    };
+
+    // Log snapshot for external monitoring (Sentry, Railway logs, etc.)
+    console.log(`[SNAPSHOT] ${JSON.stringify(snapshot)}`);
+
+    // Store in AuditLog for history
+    await prisma.auditLog.create({
+      data: {
+        accion:     'data_snapshot',
+        entidad:    'Sistema',
+        valorDespues: snapshot,
+      },
+    }).catch(() => {});
+
+    // Alert if counts drop significantly (> 5% loss in 24h — canary for data corruption)
+    // NOTE: in production compare against yesterday's snapshot stored in AuditLog
+
+  } catch (err) {
+    console.error('[CRON] snapshotSaludDatos error:', err.message);
+  }
+}
+
+// ── Clean old login attempts (> 30 days) ─────────────────────────────────
+async function limpiarIntentosLogin() {
+  try {
+    const hace30d = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+    const { count } = await prisma.loginAttempt.deleteMany({
+      where: { createdAt: { lt: hace30d } },
+    });
+    if (count > 0) console.log(`[CRON] Limpiados ${count} intentos de login antiguos`);
+  } catch (err) {
+    console.error('[CRON] limpiarIntentosLogin error:', err.message);
+  }
+}

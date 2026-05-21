@@ -1,14 +1,39 @@
-const express    = require('express');
-const cors       = require('cors');
-const helmet     = require('helmet');
-const morgan     = require('morgan');
-const rateLimit  = require('express-rate-limit');
-const { Sentry } = require('./lib/sentry');
+const express      = require('express');
+const cors         = require('cors');
+const helmet       = require('helmet');
+const morgan       = require('morgan');
+const rateLimit    = require('express-rate-limit');
+const compression  = require('compression');
+const crypto       = require('crypto');
+const { Sentry }   = require('./lib/sentry');
 
 const app = express();
 
+// ── Gzip compression (before anything else for max coverage) ─────────────
+app.use(compression({
+  level: 6,           // good balance of speed vs size
+  threshold: 1024,    // only compress responses > 1KB
+  filter: (req, res) => {
+    if (req.headers['x-no-compression']) return false;
+    return compression.filter(req, res);
+  },
+}));
+
+// ── HTTPS enforcement (production behind Railway/Render proxy) ────────────
+if (process.env.NODE_ENV === 'production') {
+  app.use((req, res, next) => {
+    if (req.headers['x-forwarded-proto'] && req.headers['x-forwarded-proto'] !== 'https') {
+      return res.redirect(301, `https://${req.headers['host']}${req.url}`);
+    }
+    next();
+  });
+}
+
 // ── Seguridad: Helmet + CORS ──────────────────────────────────────────────
-app.use(helmet());
+app.use(helmet({
+  crossOriginResourcePolicy: { policy: 'cross-origin' },
+  contentSecurityPolicy: false, // CSP managed at edge (Vercel)
+}));
 
 const allowedOrigins = process.env.ALLOWED_ORIGINS
   ? process.env.ALLOWED_ORIGINS.split(',').map(o => o.trim())
@@ -46,6 +71,7 @@ app.use('/auth/register',            authLimiter);
 app.use('/auth/forgot-password',     authLimiter);
 app.use('/auth/reset-password',      authLimiter);
 app.use('/auth/resend-verification', authLimiter);
+app.use('/auth/refresh',             authLimiter);
 app.use('/bookings',      apiLimiter);
 app.use('/providers',     apiLimiter);
 app.use('/reviews',       apiLimiter);
@@ -66,9 +92,50 @@ const chatLimiter = rateLimit({
 });
 app.use('/chat', chatLimiter);
 
+// ── Cache-Control for public GET endpoints ────────────────────────────────
+app.use((req, res, next) => {
+  if (req.method === 'GET') {
+    // Public provider/service lists → 60s shared cache
+    if (/^\/(providers|services)(\?|\/|$)/.test(req.path)) {
+      res.set('Cache-Control', 'public, max-age=60, stale-while-revalidate=120');
+    }
+    // Health check → 30s
+    else if (req.path === '/health') {
+      res.set('Cache-Control', 'public, max-age=30');
+    }
+    // Auth'd resources → no public cache
+    else {
+      res.set('Cache-Control', 'no-store');
+    }
+  }
+  next();
+});
+
+// ── Request ID + Response Timing ─────────────────────────────────────────
+app.use((req, res, next) => {
+  const id = req.headers['x-request-id'] || crypto.randomBytes(8).toString('hex');
+  req.requestId = id;
+  res.set('X-Request-ID', id);
+  const start = Date.now();
+  res.on('finish', () => {
+    const ms = Date.now() - start;
+    res.set('X-Response-Time', `${ms}ms`);
+    // Log slow requests (> 800ms) outside of test env
+    if (ms > 800 && process.env.NODE_ENV !== 'test') {
+      console.warn(`[SLOW] ${req.method} ${req.path} — ${ms}ms (reqId: ${id})`);
+    }
+  });
+  next();
+});
+
 // ── Logging + Body ────────────────────────────────────────────────────────
 if (process.env.NODE_ENV !== 'test') {
-  app.use(morgan(process.env.NODE_ENV === 'production' ? 'combined' : 'dev'));
+  // Include request ID in morgan log token
+  morgan.token('reqid', req => req.requestId);
+  const fmt = process.env.NODE_ENV === 'production'
+    ? ':reqid :method :url :status :response-time ms'
+    : 'dev';
+  app.use(morgan(fmt));
 }
 app.use(express.json({ limit: '10kb' }));
 
@@ -85,6 +152,16 @@ app.use('/favorites',     require('./routes/favorites.routes'));
 app.use('/notifications', require('./routes/notifications.routes'));
 app.use('/messages',      require('./routes/messages.routes'));
 app.use('/marketing',     require('./routes/marketing.routes'));
+app.use('/ads',           require('./routes/ads.routes'));
+app.use('/hr',            require('./routes/hr.routes'));
+app.use('/projects',      require('./routes/projects.routes'));
+app.use('/cs',            require('./routes/cs.routes'));
+app.use('/predictions',   require('./routes/predictions.routes'));
+app.use('/automations',   require('./routes/automations.routes'));
+app.use('/coupons',       require('./routes/coupons.routes'));
+app.use('/recommend',     require('./routes/recommend.routes'));
+app.use('/loyalty',       require('./routes/loyalty.routes'));
+app.use('/zone',          require('./routes/zone.routes'));
 app.use('/push',          require('./routes/push.routes'));
 app.use('/referrals',     require('./routes/referrals.routes'));
 
@@ -168,36 +245,64 @@ app.get('/sitemap.xml', async (req, res) => {
   }
 });
 
-// ── Health check ──────────────────────────────────────────────────────────
-app.get('/health', (req, res) => {
-  res.json({
-    status: 'ok',
-    project: 'DutyJoy Backend',
-    version: '1.0.0',
-    env: process.env.NODE_ENV,
-    timestamp: new Date().toISOString(),
-  });
+// ── Health check (deep — checks DB connectivity) ──────────────────────────
+app.get('/health', async (req, res) => {
+  const start = Date.now();
+  try {
+    await prisma.$queryRaw`SELECT 1`;
+    res.json({
+      status:    'ok',
+      project:   'DutyJoy Backend',
+      version:   '1.0.0',
+      env:       process.env.NODE_ENV,
+      db:        'ok',
+      dbLatency: `${Date.now() - start}ms`,
+      timestamp: new Date().toISOString(),
+    });
+  } catch {
+    res.status(503).json({
+      status:    'degraded',
+      project:   'DutyJoy Backend',
+      version:   '1.0.0',
+      db:        'error',
+      timestamp: new Date().toISOString(),
+    });
+  }
 });
 
 // ── 404 ───────────────────────────────────────────────────────────────────
 app.use((req, res) => {
-  res.status(404).json({ error: `Ruta no encontrada: ${req.method} ${req.path}` });
+  res.status(404).json({
+    error: `Ruta no encontrada: ${req.method} ${req.path}`,
+    code:  'NOT_FOUND',
+    requestId: req.requestId,
+  });
 });
 
 // ── Error handler global ──────────────────────────────────────────────────
 app.use((err, req, res, next) => {
-  // Reportar a Sentry si está activo (solo errores 5xx)
-  if (process.env.SENTRY_DSN && (!err.status || err.status >= 500)) {
+  const status = err.status || 500;
+
+  // Report to Sentry (5xx only)
+  if (process.env.SENTRY_DSN && status >= 500) {
     Sentry.captureException(err);
   }
+
   if (err.message?.startsWith('CORS')) {
-    return res.status(403).json({ error: err.message });
+    return res.status(403).json({ error: err.message, code: 'CORS_BLOCKED', requestId: req.requestId });
   }
-  console.error(`[ERROR] ${err.stack}`);
-  res.status(err.status || 500).json({
-    error: process.env.NODE_ENV === 'production'
+
+  // Never log 4xx as errors — only 5xx
+  if (status >= 500) {
+    console.error(`[ERROR ${status}] ${req.method} ${req.path} reqId=${req.requestId} — ${err.message}`);
+  }
+
+  res.status(status).json({
+    error: process.env.NODE_ENV === 'production' && status >= 500
       ? 'Error interno del servidor'
       : err.message,
+    code:      err.code || (status >= 500 ? 'INTERNAL_ERROR' : 'REQUEST_ERROR'),
+    requestId: req.requestId,
   });
 });
 

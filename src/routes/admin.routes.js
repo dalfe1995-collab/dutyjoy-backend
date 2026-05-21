@@ -2,6 +2,8 @@ const router = require('express').Router();
 const verifyToken = require('../middleware/verifyToken');
 const prisma = require('../lib/prisma');
 const email = require('../lib/email');
+const { audit } = require('../lib/audit');
+const { invalidateAuthCache } = require('../middleware/verifyToken');
 const OpenAI = require('openai');
 
 const openai = process.env.OPENAI_API_KEY ? new OpenAI({ apiKey: process.env.OPENAI_API_KEY }) : null;
@@ -185,37 +187,72 @@ router.get('/stats/monthly', verifyToken, soloAdmin, async (req, res) => {
 // GET /admin/users — listar todos los usuarios con filtros
 router.get('/users', verifyToken, soloAdmin, async (req, res) => {
   try {
-    const { rol, search, page = 1, limit = 20 } = req.query;
+    const {
+      rol, search, page = 1, limit = 20,
+      ciudad, activo, emailVerificado,
+      createdDesde, createdHasta,
+      minBookings, maxBookings,
+      referido,               // 'true' = has referredById
+      sort = 'createdAt', order = 'desc',
+    } = req.query;
+
+    const SORT_WHITELIST = ['createdAt', 'nombre', 'email'];
+    const sortField  = SORT_WHITELIST.includes(sort) ? sort : 'createdAt';
+    const sortOrder  = order === 'asc' ? 'asc' : 'desc';
 
     const where = {
-      ...(rol && { rol }),
+      ...(rol && rol !== 'TODOS' && { rol }),
+      ...(ciudad && { ciudad: { contains: ciudad, mode: 'insensitive' } }),
+      ...(activo !== undefined && activo !== '' && { activo: activo === 'true' }),
+      ...(emailVerificado !== undefined && emailVerificado !== '' && { emailVerificado: emailVerificado === 'true' }),
+      ...(referido === 'true'  && { referredById: { not: null } }),
+      ...(referido === 'false' && { referredById: null }),
+      ...(createdDesde || createdHasta ? {
+        createdAt: {
+          ...(createdDesde && { gte: new Date(createdDesde) }),
+          ...(createdHasta && { lte: new Date(new Date(createdHasta).setHours(23,59,59,999)) }),
+        },
+      } : {}),
       ...(search && {
         OR: [
-          { nombre: { contains: search, mode: 'insensitive' } },
-          { email: { contains: search, mode: 'insensitive' } },
+          { nombre:   { contains: search, mode: 'insensitive' } },
+          { email:    { contains: search, mode: 'insensitive' } },
+          { telefono: { contains: search } },
+          { ciudad:   { contains: search, mode: 'insensitive' } },
         ],
       }),
     };
 
-    const [users, total] = await Promise.all([
+    const take = Math.min(parseInt(limit) || 20, 100);
+    const skip = (Math.max(parseInt(page) || 1, 1) - 1) * take;
+
+    let [users, total] = await Promise.all([
       prisma.user.findMany({
         where,
         select: {
           id: true, nombre: true, email: true, telefono: true,
           ciudad: true, rol: true, activo: true, emailVerificado: true, createdAt: true,
+          referralCode: true, referredById: true,
           providerProfile: {
-            select: { calificacion: true, totalReviews: true, verificado: true, servicios: true }
+            select: { calificacion: true, totalReviews: true, verificado: true, servicios: true, disponible: true }
           },
-          _count: { select: { bookingsComoCliente: true } },
+          _count: { select: { bookingsComoCliente: true, referrals: true } },
         },
-        orderBy: { createdAt: 'desc' },
-        skip: (parseInt(page) - 1) * parseInt(limit),
-        take: parseInt(limit),
+        orderBy: { [sortField]: sortOrder },
+        skip,
+        take,
       }),
       prisma.user.count({ where }),
     ]);
 
-    res.json({ users, total, page: parseInt(page), totalPages: Math.ceil(total / parseInt(limit)) });
+    // Post-filter by booking count (no Prisma support for _count in where)
+    if (minBookings || maxBookings) {
+      const mn = parseInt(minBookings) || 0;
+      const mx = parseInt(maxBookings) || Infinity;
+      users = users.filter(u => u._count.bookingsComoCliente >= mn && u._count.bookingsComoCliente <= mx);
+    }
+
+    res.json({ users, total, page: parseInt(page), totalPages: Math.ceil(total / take) });
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: 'Error al obtener usuarios' });
@@ -255,11 +292,26 @@ router.patch('/users/:id', verifyToken, soloAdmin, async (req, res) => {
     if (activo !== undefined) data.activo = activo;
     if (rol && ['CLIENTE', 'PROVEEDOR', 'ADMIN'].includes(rol)) data.rol = rol;
 
+    // Snapshot before change for audit trail
+    const before = await prisma.user.findUnique({
+      where: { id: req.params.id },
+      select: { id: true, nombre: true, email: true, rol: true, activo: true },
+    });
+
     const user = await prisma.user.update({
       where: { id: req.params.id },
       data,
       select: { id: true, nombre: true, email: true, rol: true, activo: true },
     });
+
+    // Evict from auth cache immediately so role/activo change takes effect within seconds
+    invalidateAuthCache(req.params.id);
+
+    // Audit trail: log who changed what
+    const accion = rol && before.rol !== rol ? 'admin_rol_cambiado'
+                 : activo !== undefined      ? 'admin_usuario_estado'
+                 : 'admin_usuario_actualizado';
+    audit({ accion, userId: req.user.id, entidad: 'User', entidadId: req.params.id, antes: before, despues: user, req }).catch(() => {});
 
     res.json({ mensaje: 'Usuario actualizado', user });
   } catch (error) {
@@ -271,38 +323,72 @@ router.patch('/users/:id', verifyToken, soloAdmin, async (req, res) => {
 // GET /admin/providers — listar proveedores con stats
 router.get('/providers', verifyToken, soloAdmin, async (req, res) => {
   try {
-    const { verificado, cedulaStatus, search, page = 1, limit = 20 } = req.query;
+    const {
+      verificado, cedulaStatus, search, page = 1, limit = 20,
+      servicio, ciudad,
+      ratingMin, ratingMax,
+      tarifaMin, tarifaMax,
+      disponible, instantBooking,
+      backgroundStatus,
+      createdDesde, createdHasta,
+      completadasMin, completadasMax,
+      sort = 'createdAt', order = 'desc',
+    } = req.query;
+
+    const SORT_WHITELIST = ['createdAt', 'calificacion', 'tarifaPorHora', 'reservasCompletadas', 'totalReviews', 'totalViews'];
+    const sortField  = SORT_WHITELIST.includes(sort) ? sort : 'createdAt';
+    const sortOrder  = order === 'asc' ? 'asc' : 'desc';
 
     const estadosCedulaValidos = ['sin_enviar', 'pendiente', 'aprobado', 'rechazado'];
     const where = {
-      ...(verificado !== undefined && { verificado: verificado === 'true' }),
+      ...(verificado !== undefined && verificado !== '' && { verificado: verificado === 'true' }),
+      ...(disponible !== undefined && disponible !== '' && { disponible: disponible === 'true' }),
+      ...(instantBooking !== undefined && instantBooking !== '' && { instantBooking: instantBooking === 'true' }),
       ...(cedulaStatus && estadosCedulaValidos.includes(cedulaStatus) && { cedulaStatus }),
-      ...(search && {
-        user: {
-          OR: [
-            { nombre: { contains: search, mode: 'insensitive' } },
-            { email: { contains: search, mode: 'insensitive' } },
-          ],
+      ...(backgroundStatus && { backgroundStatus }),
+      ...(servicio && { servicios: { has: servicio } }),
+      ...(ciudad   && { ciudades: { has: ciudad } }),
+      ...(ratingMin && { calificacion: { gte: parseFloat(ratingMin) } }),
+      ...(tarifaMin && { tarifaPorHora: { gte: parseFloat(tarifaMin) } }),
+      ...(completadasMin && { reservasCompletadas: { gte: parseInt(completadasMin) } }),
+      ...(createdDesde || createdHasta ? {
+        createdAt: {
+          ...(createdDesde && { gte: new Date(createdDesde) }),
+          ...(createdHasta && { lte: new Date(new Date(createdHasta).setHours(23,59,59,999)) }),
         },
+      } : {}),
+      ...(search && {
+        OR: [
+          { user: { nombre: { contains: search, mode: 'insensitive' } } },
+          { user: { email:  { contains: search, mode: 'insensitive' } } },
+          { user: { ciudad: { contains: search, mode: 'insensitive' } } },
+        ],
       }),
     };
+
+    // Merge compound ranges
+    if (ratingMin && ratingMax) where.calificacion = { gte: parseFloat(ratingMin), lte: parseFloat(ratingMax) };
+    if (tarifaMin && tarifaMax) where.tarifaPorHora = { gte: parseFloat(tarifaMin), lte: parseFloat(tarifaMax) };
+    if (completadasMin && completadasMax) where.reservasCompletadas = { gte: parseInt(completadasMin), lte: parseInt(completadasMax) };
+
+    const take = Math.min(parseInt(limit) || 20, 100);
+    const skip = (Math.max(parseInt(page) || 1, 1) - 1) * take;
 
     const [providers, total] = await Promise.all([
       prisma.providerProfile.findMany({
         where,
         include: {
-          user: { select: { nombre: true, email: true, telefono: true, ciudad: true, createdAt: true } },
+          user: { select: { nombre: true, email: true, telefono: true, ciudad: true, createdAt: true, activo: true } },
           _count: { select: { bookings: true, reviews: true } },
         },
-        // cedulaUrl, cedulaStatus, cedulaNota incluidos automáticamente (campos del modelo)
-        orderBy: { createdAt: 'desc' },
-        skip: (parseInt(page) - 1) * parseInt(limit),
-        take: parseInt(limit),
+        orderBy: { [sortField]: sortOrder },
+        skip,
+        take,
       }),
       prisma.providerProfile.count({ where }),
     ]);
 
-    res.json({ providers, total, page: parseInt(page), totalPages: Math.ceil(total / parseInt(limit)) });
+    res.json({ providers, total, page: parseInt(page), totalPages: Math.ceil(total / take) });
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: 'Error al obtener proveedores' });
@@ -431,36 +517,99 @@ router.patch('/providers/:id/verify', verifyToken, soloAdmin, async (req, res) =
 // GET /admin/bookings — listar todas las reservas
 router.get('/bookings', verifyToken, soloAdmin, async (req, res) => {
   try {
-    const { estado, search, page = 1, limit = 20 } = req.query;
+    const {
+      estado, search, page = 1, limit = 20,
+      fechaDesde, fechaHasta,          // ISO date strings for fechaServicio range
+      createdDesde, createdHasta,      // ISO date strings for createdAt range
+      horaDesde, horaHasta,            // "HH:MM" strings (filter in JS after fetch — Prisma lacks time-of-day filters)
+      precioMin, precioMax,
+      duracionMin, duracionMax,
+      tipoServicio, ciudad, recurrencia,
+      conPago, conRevision,            // booleans as strings
+      sort = 'createdAt', order = 'desc',
+    } = req.query;
+
+    const SORT_WHITELIST = ['createdAt', 'fechaServicio', 'precioTotal', 'duracionHoras', 'updatedAt'];
+    const sortField  = SORT_WHITELIST.includes(sort) ? sort : 'createdAt';
+    const sortOrder  = order === 'asc' ? 'asc' : 'desc';
 
     const where = {
-      ...(estado && { estado }),
+      ...(estado     && estado !== 'TODOS' && { estado }),
+      ...(recurrencia && recurrencia !== 'TODOS' && { recurrencia }),
+      ...(tipoServicio && { tipoServicio: { contains: tipoServicio, mode: 'insensitive' } }),
+      ...(ciudad && {
+        OR: [
+          { cliente: { ciudad: { contains: ciudad, mode: 'insensitive' } } },
+          { proveedor: { ciudades: { has: ciudad } } },
+        ],
+      }),
+      ...(precioMin  && { precioTotal: { gte: parseFloat(precioMin) } }),
+      ...(precioMax  && { precioTotal: { ...(precioMin ? { gte: parseFloat(precioMin) } : {}), lte: parseFloat(precioMax) } }),
+      ...(duracionMin && { duracionHoras: { gte: parseFloat(duracionMin) } }),
+      ...(duracionMax && { duracionHoras: { ...(duracionMin ? { gte: parseFloat(duracionMin) } : {}), lte: parseFloat(duracionMax) } }),
+      ...(fechaDesde || fechaHasta ? {
+        fechaServicio: {
+          ...(fechaDesde && { gte: new Date(fechaDesde) }),
+          ...(fechaHasta && { lte: new Date(new Date(fechaHasta).setHours(23, 59, 59, 999)) }),
+        },
+      } : {}),
+      ...(createdDesde || createdHasta ? {
+        createdAt: {
+          ...(createdDesde && { gte: new Date(createdDesde) }),
+          ...(createdHasta && { lte: new Date(new Date(createdHasta).setHours(23, 59, 59, 999)) }),
+        },
+      } : {}),
+      ...(conPago === 'true'    && { pagos: { some: { tipo: 'CLIENTE_RECIBIDO' } } }),
+      ...(conPago === 'false'   && { pagos: { none: { tipo: 'CLIENTE_RECIBIDO' } } }),
+      ...(conRevision === 'true' && { review: { isNot: null } }),
+      ...(conRevision === 'false'&& { review: { is: null } }),
       ...(search && {
         OR: [
           { cliente: { nombre: { contains: search, mode: 'insensitive' } } },
           { cliente: { email:  { contains: search, mode: 'insensitive' } } },
           { proveedor: { user: { nombre: { contains: search, mode: 'insensitive' } } } },
           { tipoServicio: { contains: search, mode: 'insensitive' } },
+          { id: { contains: search } },
         ],
       }),
     };
+
+    // Merge price and duration ranges properly (avoid duplicate key)
+    if (precioMin && precioMax) where.precioTotal = { gte: parseFloat(precioMin), lte: parseFloat(precioMax) };
+    if (duracionMin && duracionMax) where.duracionHoras = { gte: parseFloat(duracionMin), lte: parseFloat(duracionMax) };
+
+    const take = Math.min(parseInt(limit) || 20, 100);
+    const skip = (Math.max(parseInt(page) || 1, 1) - 1) * take;
 
     const [bookings, total] = await Promise.all([
       prisma.booking.findMany({
         where,
         include: {
-          cliente: { select: { nombre: true, email: true } },
-          proveedor: { include: { user: { select: { nombre: true } } } },
-          review: { select: { calificacion: true } },
+          cliente: { select: { nombre: true, email: true, ciudad: true } },
+          proveedor: { include: { user: { select: { nombre: true, email: true } } } },
+          review:  { select: { calificacion: true } },
+          pagos:   { select: { tipo: true, estado: true, monto: true }, take: 1 },
         },
-        orderBy: { createdAt: 'desc' },
-        skip: (parseInt(page) - 1) * parseInt(limit),
-        take: parseInt(limit),
+        orderBy: { [sortField]: sortOrder },
+        skip,
+        take,
       }),
       prisma.booking.count({ where }),
     ]);
 
-    res.json({ bookings, total, page: parseInt(page), totalPages: Math.ceil(total / parseInt(limit)) });
+    // Hour-of-day filter (post-query, only when specified)
+    let result = bookings;
+    if (horaDesde || horaHasta) {
+      const hD = horaDesde ? parseInt(horaDesde.split(':')[0]) * 60 + parseInt(horaDesde.split(':')[1] || 0) : 0;
+      const hH = horaHasta ? parseInt(horaHasta.split(':')[0]) * 60 + parseInt(horaHasta.split(':')[1] || 0) : 1439;
+      result = bookings.filter(b => {
+        const d = new Date(b.fechaServicio);
+        const mins = d.getHours() * 60 + d.getMinutes();
+        return mins >= hD && mins <= hH;
+      });
+    }
+
+    res.json({ bookings: result, total, page: parseInt(page), totalPages: Math.ceil(total / take) });
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: 'Error al obtener reservas' });
@@ -1568,6 +1717,54 @@ router.post('/campaigns/send-digest/:providerId', verifyToken, soloAdmin, async 
   } catch (e) {
     console.error('[campaigns/send-digest]', e);
     res.status(500).json({ error: 'Error al enviar digest.' });
+  }
+});
+
+// ── GET /admin/security — audit logs + brute force stats ─────────────────
+router.get('/security', verifyToken, soloAdmin, async (req, res) => {
+  try {
+    const hace24h = new Date(Date.now() - 24 * 60 * 60 * 1000);
+    const hace7d  = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+
+    const [auditRecentes, intentosFallidos, cuentasAtacadas, snapshots] = await Promise.all([
+      // Last 50 audit events
+      prisma.auditLog.findMany({
+        orderBy: { createdAt: 'desc' },
+        take: 50,
+      }),
+      // Failed login attempts last 24h grouped by email
+      prisma.$queryRaw`
+        SELECT email, ip, COUNT(*)::int as intentos, MAX("createdAt") as ultimo
+        FROM "LoginAttempt"
+        WHERE exitoso = false AND "createdAt" > ${hace24h}
+        GROUP BY email, ip
+        HAVING COUNT(*) >= 3
+        ORDER BY intentos DESC
+        LIMIT 20
+      `,
+      // Accounts with 10+ failures (brute-force targets)
+      prisma.$queryRaw`
+        SELECT email, COUNT(*)::int as intentos
+        FROM "LoginAttempt"
+        WHERE exitoso = false AND "createdAt" > ${hace24h}
+        GROUP BY email
+        HAVING COUNT(*) >= 10
+        ORDER BY intentos DESC
+        LIMIT 10
+      `,
+      // Data snapshots for trend
+      prisma.auditLog.findMany({
+        where: { accion: 'data_snapshot', createdAt: { gte: hace7d } },
+        orderBy: { createdAt: 'desc' },
+        take: 7,
+        select: { createdAt: true, valorDespues: true },
+      }),
+    ]);
+
+    res.json({ auditRecentes, intentosFallidos, cuentasAtacadas, snapshots });
+  } catch (e) {
+    console.error('[admin/security]', e);
+    res.status(500).json({ error: 'Error al obtener datos de seguridad' });
   }
 });
 

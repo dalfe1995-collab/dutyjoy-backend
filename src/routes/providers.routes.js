@@ -1579,4 +1579,159 @@ router.put('/me/location', verifyToken, async (req, res) => {
   }
 });
 
+// ── GET /providers/me/smart-pricing — AI market analysis + price suggestion ──
+router.get('/me/smart-pricing', verifyToken, async (req, res) => {
+  try {
+    if (req.user.rol !== 'PROVEEDOR') return res.status(403).json({ error: 'Solo proveedores' });
+
+    const profile = await prisma.providerProfile.findUnique({
+      where: { userId: req.user.id },
+      select: { id: true, tarifaPorHora: true, servicios: true, ciudades: true, calificacion: true, totalReviews: true, reservasCompletadas: true },
+    });
+    if (!profile) return res.status(404).json({ error: 'Perfil no encontrado' });
+
+    const servicios = profile.servicios?.slice(0, 3) || [];
+    const ciudad    = profile.ciudades?.[0] || '';
+
+    // Peers: providers in same city + at least one shared service
+    const peers = await prisma.providerProfile.findMany({
+      where: {
+        id:         { not: profile.id },
+        disponible: true,
+        ciudades:   ciudad ? { has: ciudad } : undefined,
+        servicios:  servicios.length ? { hasSome: servicios } : undefined,
+      },
+      select: { tarifaPorHora: true, calificacion: true, totalReviews: true, reservasCompletadas: true },
+      take: 100,
+    });
+
+    if (peers.length === 0) {
+      return res.json({ sugerida: profile.tarifaPorHora, mensaje: 'Sin suficientes datos de mercado aún.', peers: 0 });
+    }
+
+    const tarifas = peers.map(p => p.tarifaPorHora).sort((a, b) => a - b);
+    const p25 = tarifas[Math.floor(tarifas.length * 0.25)];
+    const p50 = tarifas[Math.floor(tarifas.length * 0.50)];
+    const p75 = tarifas[Math.floor(tarifas.length * 0.75)];
+    const avgRating = peers.reduce((s, p) => s + (p.calificacion || 0), 0) / peers.length;
+    const avgReviews = peers.reduce((s, p) => s + (p.totalReviews || 0), 0) / peers.length;
+
+    let sugerida = p50;
+    if ((profile.calificacion || 0) > avgRating + 0.5) sugerida = Math.round(p75 * 1.05);
+    else if ((profile.calificacion || 0) < avgRating - 0.5) sugerida = Math.round(p25 * 1.02);
+
+    const marketData = { p25, p50, p75, avgRating: parseFloat(avgRating.toFixed(2)), avgReviews: parseFloat(avgReviews.toFixed(1)), peers: peers.length, tuTarifa: profile.tarifaPorHora, tuCalificacion: profile.calificacion };
+
+    if (!openai) {
+      return res.json({ sugerida, rango: { min: p25, max: p75 }, marketData, analisis: 'Activa OpenAI para análisis detallado.' });
+    }
+
+    const aiRes = await openai.chat.completions.create({
+      model: 'gpt-4o-mini',
+      max_tokens: 200,
+      messages: [{
+        role: 'user',
+        content: `Proveedor de servicios del hogar en ${ciudad || 'Colombia'} (${servicios.join(', ')}).
+Tu tarifa: $${profile.tarifaPorHora.toLocaleString('es-CO')}/h | Calificación: ${profile.calificacion}/5 (${profile.totalReviews} reseñas)
+Mercado (${peers.length} proveedores similares): p25=$${p25?.toLocaleString('es-CO')} p50=$${p50?.toLocaleString('es-CO')} p75=$${p75?.toLocaleString('es-CO')}/h | CalifProm: ${avgRating.toFixed(1)}
+Sugerencia calculada: $${sugerida?.toLocaleString('es-CO')}/h
+Escribe 2 frases en español: por qué esta tarifa tiene sentido y cómo posicionarse. Sé directo.`,
+      }],
+    });
+
+    res.json({
+      sugerida,
+      rango:    { min: p25, max: p75 },
+      marketData,
+      analisis: aiRes.choices[0].message.content.trim(),
+    });
+  } catch (e) {
+    console.error('[smart-pricing]', e);
+    res.status(500).json({ error: 'Error al calcular precio' });
+  }
+});
+
+// ── GET /providers/me/completeness — profile completeness score ──────────
+router.get('/me/completeness', verifyToken, async (req, res) => {
+  try {
+    if (req.user.rol !== 'PROVEEDOR') return res.status(403).json({ error: 'Solo proveedores' });
+    const [profile, user] = await Promise.all([
+      prisma.providerProfile.findUnique({ where: { userId: req.user.id } }),
+      prisma.user.findUnique({ where: { id: req.user.id }, select: { telefono: true, emailVerificado: true } }),
+    ]);
+    if (!profile) return res.status(404).json({ error: 'Perfil no encontrado' });
+
+    const checks = [
+      { key: 'bio',           label: 'Descripción del perfil',       done: !!(profile.bio?.trim().length > 30), peso: 15 },
+      { key: 'servicios',     label: 'Servicios configurados',       done: profile.servicios?.length > 0,        peso: 15 },
+      { key: 'ciudades',      label: 'Ciudades de servicio',         done: profile.ciudades?.length > 0,         peso: 10 },
+      { key: 'telefono',      label: 'Teléfono de contacto',         done: !!user?.telefono,                     peso: 10 },
+      { key: 'emailVerif',    label: 'Email verificado',             done: !!user?.emailVerificado,              peso: 10 },
+      { key: 'cedula',        label: 'Cédula subida',                done: profile.cedulaStatus === 'aprobado',  peso: 15 },
+      { key: 'horario',       label: 'Horario de disponibilidad',    done: !!profile.horario,                    peso: 10 },
+      { key: 'portfolio',     label: 'Fotos de trabajos anteriores', done: profile.portfolioUrls?.length >= 2,   peso: 10 },
+      { key: 'cobro',         label: 'Método de cobro configurado',  done: !!(profile.metodoCobro && profile.numeroCobro), peso: 15 },
+    ];
+
+    const total = checks.reduce((s, c) => s + c.peso, 0);
+    const score = checks.filter(c => c.done).reduce((s, c) => s + c.peso, 0);
+    const pct   = Math.round((score / total) * 100);
+    const missing = checks.filter(c => !c.done).map(c => ({ key: c.key, label: c.label, peso: c.peso }));
+
+    res.json({ score: pct, checks, missing, nivel: pct >= 90 ? 'completo' : pct >= 60 ? 'bueno' : 'incompleto' });
+  } catch (e) {
+    res.status(500).json({ error: 'Error' });
+  }
+});
+
+// ── GET/POST/DELETE /providers/me/unavailability — block dates ───────────
+router.get('/me/unavailability', verifyToken, async (req, res) => {
+  try {
+    if (req.user.rol !== 'PROVEEDOR') return res.status(403).json({ error: 'Solo proveedores' });
+    const profile = await prisma.providerProfile.findUnique({ where: { userId: req.user.id }, select: { id: true } });
+    if (!profile) return res.status(404).json({ error: 'Perfil no encontrado' });
+
+    const desde = new Date(); desde.setHours(0,0,0,0);
+    const items = await prisma.providerUnavailability.findMany({
+      where: { providerId: profile.id, fechaFin: { gte: desde } },
+      orderBy: { fechaInicio: 'asc' },
+    });
+    res.json(items);
+  } catch (e) { res.status(500).json({ error: 'Error' }); }
+});
+
+router.post('/me/unavailability', verifyToken, async (req, res) => {
+  try {
+    if (req.user.rol !== 'PROVEEDOR') return res.status(403).json({ error: 'Solo proveedores' });
+    const { fechaInicio, fechaFin, motivo } = req.body;
+    if (!fechaInicio || !fechaFin) return res.status(400).json({ error: 'fechaInicio y fechaFin son requeridos' });
+
+    const inicio = new Date(fechaInicio);
+    const fin    = new Date(fechaFin);
+    if (isNaN(inicio) || isNaN(fin) || fin < inicio) return res.status(400).json({ error: 'Rango de fechas inválido' });
+    // Max 90-day block
+    const diffDays = (fin - inicio) / (1000 * 60 * 60 * 24);
+    if (diffDays > 90) return res.status(400).json({ error: 'Máximo 90 días por bloqueo' });
+
+    const profile = await prisma.providerProfile.findUnique({ where: { userId: req.user.id }, select: { id: true } });
+    if (!profile) return res.status(404).json({ error: 'Perfil no encontrado' });
+
+    const item = await prisma.providerUnavailability.create({
+      data: { providerId: profile.id, fechaInicio: inicio, fechaFin: fin, motivo: motivo?.slice(0, 100) || null },
+    });
+    res.json(item);
+  } catch (e) { res.status(500).json({ error: 'Error' }); }
+});
+
+router.delete('/me/unavailability/:id', verifyToken, async (req, res) => {
+  try {
+    if (req.user.rol !== 'PROVEEDOR') return res.status(403).json({ error: 'Solo proveedores' });
+    const profile = await prisma.providerProfile.findUnique({ where: { userId: req.user.id }, select: { id: true } });
+    await prisma.providerUnavailability.deleteMany({
+      where: { id: req.params.id, providerId: profile?.id },
+    });
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: 'Error' }); }
+});
+
 module.exports = router;
