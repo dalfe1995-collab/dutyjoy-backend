@@ -1,4 +1,6 @@
-const cron  = require('node-cron');
+const cron   = require('node-cron');
+const https  = require('https');
+const http   = require('http');
 const prisma = require('./prisma');
 const email  = require('./email');
 const { updateProviderEmbedding } = require('./embeddings');
@@ -442,6 +444,19 @@ function iniciarCrons() {
   cron.schedule('0 6 * * *', detectarAnomaliasPagos, {
     timezone: 'America/Bogota',
   });
+
+  // ── Self-ping: prevents Render free tier cold start (spins down after 15min) ──
+  if (process.env.NODE_ENV === 'production') {
+    const selfUrl = process.env.BACKEND_URL || 'https://dutyjoy-api-prod.onrender.com';
+    cron.schedule('*/14 * * * *', () => {
+      const mod = selfUrl.startsWith('https') ? https : http;
+      mod.get(`${selfUrl}/health`, (res) => {
+        // Swallow — just keeping the dyno alive
+        res.resume();
+      }).on('error', () => {}); // silent fail — cron is best-effort
+    });
+    console.log('💓  Self-ping activo cada 14 min → previene cold start en Render Free');
+  }
 
   console.log('⏰  Crons activos: recordatorio24h (:00) · expiracionReservas (:30) · autoCompletar (:45) · tiempoRespuesta (03:00) · tasaAceptacion (03:30) · recurrencias (07:00) · embeddings (02:00) · fraude (04:00) · seguridad (01:00) · snapshot (01:30) · limpiezaLogins (05:00) · anomalias (06:00) · onboarding (09:00) · reengagement (lun 10:00) · digest (lun 10:30)');
 }
