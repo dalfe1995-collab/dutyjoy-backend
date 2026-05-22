@@ -1,8 +1,9 @@
-const router      = require('express').Router();
-const bcrypt      = require('bcryptjs');
-const jwt         = require('jsonwebtoken');
-const crypto      = require('crypto');
-const verifyToken = require('../middleware/verifyToken');
+const router          = require('express').Router();
+const bcrypt          = require('bcryptjs');
+const jwt             = require('jsonwebtoken');
+const crypto          = require('crypto');
+const verifyToken     = require('../middleware/verifyToken');
+const { verifyCaptcha } = require('../middleware/verifyCaptcha');
 const { updateProviderEmbedding } = require('../lib/embeddings');
 const prisma      = require('../lib/prisma');
 const email       = require('../lib/email');
@@ -57,7 +58,7 @@ function generateReferralCode(nombre) {
 }
 
 // POST /auth/register
-router.post('/register', async (req, res) => {
+router.post('/register', verifyCaptcha, async (req, res) => {
   try {
     const { nombre, email: emailAddr, password, telefono, ciudad, rol, ref,
             utmSource, utmMedium, utmCampaign, utmContent, utmTerm } = req.body;
@@ -324,7 +325,7 @@ router.put('/me/password', verifyToken, async (req, res) => {
 });
 
 // POST /auth/forgot-password — enviar email con token de reset
-router.post('/forgot-password', async (req, res) => {
+router.post('/forgot-password', verifyCaptcha, async (req, res) => {
   try {
     const { email: emailAddr } = req.body;
 
