@@ -10,6 +10,8 @@ const SERVICIOS = [
   { id: 'mudanzas',     nombre: 'Mudanzas y trasteos',  icon: '📦', descripcion: 'Empaque, carga y transporte de muebles y enseres' },
   { id: 'cuidado',      nombre: 'Cuidado de personas',  icon: '👶', descripcion: 'Cuidado de niños, adultos mayores y personas con necesidades especiales' },
   { id: 'pintura',      nombre: 'Pintura',              icon: '🎨', descripcion: 'Pintura de interiores, exteriores y fachadas' },
+  { id: 'instalaciones',nombre: 'Instalación y ensamblaje', icon: '🔩', descripcion: 'Instalación de electrodomésticos, equipos y dispositivos, y ensamblaje de muebles y armarios' },
+  { id: 'seguridad',    nombre: 'Escolta y seguridad',  icon: '🛡️', descripcion: 'Servicio de escolta y seguridad personal por horas con personal capacitado' },
 ];
 
 // GET /services — catálogo completo de servicios
