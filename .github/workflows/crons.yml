@@ -1,0 +1,60 @@
+name: Crons DutyJoy
+
+# Schedules en UTC (Bogotá = UTC-5). Ejecutan jobs vía /api/cron del
+# backend en Vercel. Token: usa el secret CRON_SECRET si existe; si no,
+# cae al valor por defecto (repo privado — rotar a secret cuando se pueda).
+
+on:
+  workflow_dispatch:
+    inputs:
+      job:
+        description: 'Nombre del job a ejecutar (vacío = batch horario)'
+        required: false
+        default: ''
+  schedule:
+    - cron: '5 * * * *'    # horario: recordatorios + expiradas + completadas
+    - cron: '0 8 * * *'    # diario 3:00am Bogotá: batch de mantenimiento
+    - cron: '0 15 * * 1'   # lunes 10:00am Bogotá: emails semanales
+
+env:
+  API: https://dutyjoy-api.vercel.app/api/cron
+  TOKEN: ${{ secrets.CRON_SECRET || '305f8de7997c1867f13ed3e45415db7177f0ea566b13331f' }}
+
+jobs:
+  run-crons:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ejecutar jobs según schedule
+        run: |
+          run_job() {
+            echo "→ $1"
+            curl -sS --max-time 90 -H "Authorization: Bearer $TOKEN" "$API?job=$1" || echo "FALLO: $1"
+            echo ""
+          }
+
+          MANUAL="${{ github.event.inputs.job }}"
+          if [ -n "$MANUAL" ]; then run_job "$MANUAL"; exit 0; fi
+
+          HOUR_UTC=$(date -u +%H)
+          DOW=$(date -u +%u)
+
+          # Cada hora
+          run_job enviarRecordatorios
+          run_job cancelarReservasExpiradas
+          run_job completarReservasFinalizadas
+
+          # Batch diario (corre en la ejecución de las 08:xx UTC)
+          if [ "$HOUR_UTC" = "08" ]; then
+            for j in auditarSeguridad snapshotSaludDatos generarEmbeddingsPendientes \
+                     actualizarTiemposRespuesta actualizarTasasAceptacion escanearResenasFraude \
+                     limpiarIntentosLogin detectarAnomaliasPagos generarRecurrencias \
+                     enviarNudgesOnboarding; do
+              run_job "$j"
+            done
+          fi
+
+          # Semanales (lunes 15:xx UTC)
+          if [ "$DOW" = "1" ] && [ "$HOUR_UTC" = "15" ]; then
+            run_job enviarReengagementSemanal
+            run_job enviarDigestProveedoresSemanal
+          fi
