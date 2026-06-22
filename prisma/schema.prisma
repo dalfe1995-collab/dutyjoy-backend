@@ -100,7 +100,7 @@ model ProviderProfile {
   cedulaNota        String?   // razón de rechazo (opcional)
   // ── Nuevas features avanzadas ──────────────────────────────────────────
   horario           Json?     // {"lun":{"activo":true,"inicio":"08:00","fin":"18:00"},...}
-  portfolioUrls     String[]  // URLs de fotos de trabajos realizados
+  portfolioUrls     String[]  @default([]) // URLs de fotos de trabajos realizados
   instantBooking    Boolean   @default(false) // salta PENDIENTE → CONFIRMADO automáticamente
   reservasCompletadas Int     @default(0)     // contador desnormalizado de COMPLETADO
   tiempoRespuestaH  Float?    // promedio de horas hasta confirmar (actualizado por cron)
@@ -687,4 +687,32 @@ model LoginAttempt {
 
   @@index([email, createdAt(sort: Desc)])
   @@index([ip, createdAt(sort: Desc)])
+}
+
+// ── Catálogos parametrizables (servicios, ciudades) ─────────────────────
+model ServiceCatalog {
+  id          String   @id // slug estable: limpieza, plomeria
+  nombre      String
+  icon        String?
+  descripcion String?
+  color       String?  // hex para UI
+  activo      Boolean  @default(true)
+  orden       Int      @default(0)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([activo, orden])
+}
+
+model CityCatalog {
+  id        String   @id // slug: bogota, ibague
+  nombre    String   @unique // nombre mostrado: Bogotá, Ibagué
+  lat       Float?
+  lng       Float?
+  activo    Boolean  @default(true)
+  orden     Int      @default(0)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([activo, orden])
 }

@@ -57,6 +57,14 @@ function generateReferralCode(nombre) {
   return prefix + suffix;
 }
 
+async function ensureProviderProfile(userId, tx = prisma) {
+  const existing = await tx.providerProfile.findUnique({ where: { userId } });
+  if (existing) return existing;
+  return tx.providerProfile.create({
+    data: { userId, portfolioUrls: [], servicios: [] },
+  });
+}
+
 // POST /auth/register
 router.post('/register', verifyCaptcha, async (req, res) => {
   try {
@@ -102,36 +110,42 @@ router.post('/register', verifyCaptcha, async (req, res) => {
     const existing = await prisma.user.findUnique({ where: { referralCode } });
     if (existing) referralCode = generateReferralCode(nombre); // retry once on collision
 
-    const user = await prisma.user.create({
-      data: {
-        nombre,
-        email:           emailAddr,
-        password:        hashedPassword,
-        telefono,
-        ciudad:          ciudad || 'Ibagué',
-        rol:             rol === 'PROVEEDOR' ? 'PROVEEDOR' : 'CLIENTE',
-        emailVerifToken,
-        refreshToken,
-        refreshTokenExp,
-        referralCode,
-        referredById,
-        ...(utmSource   && { utmSource }),
-        ...(utmMedium   && { utmMedium }),
-        ...(utmCampaign && { utmCampaign }),
-        ...(utmContent  && { utmContent }),
-        ...(utmTerm     && { utmTerm }),
-      },
+    let profileId = null;
+    const user = await prisma.$transaction(async (tx) => {
+      const created = await tx.user.create({
+        data: {
+          nombre,
+          email:           emailAddr,
+          password:        hashedPassword,
+          telefono,
+          ciudad:          ciudad || 'Ibagué',
+          rol:             rol === 'PROVEEDOR' ? 'PROVEEDOR' : 'CLIENTE',
+          emailVerifToken,
+          refreshToken,
+          refreshTokenExp,
+          referralCode,
+          referredById,
+          ...(utmSource   && { utmSource }),
+          ...(utmMedium   && { utmMedium }),
+          ...(utmCampaign && { utmCampaign }),
+          ...(utmContent  && { utmContent }),
+          ...(utmTerm     && { utmTerm }),
+        },
+      });
+
+      if (created.rol === 'PROVEEDOR') {
+        const profile = await ensureProviderProfile(created.id, tx);
+        profileId = profile.id;
+      }
+
+      return created;
     });
 
     // Re-sign with real user id
     const { accessToken: finalAccess, rawRefresh: finalRaw, refreshToken: finalRefresh, refreshTokenExp: finalExp } = issueTokens(user);
     await prisma.user.update({ where: { id: user.id }, data: { refreshToken: finalRefresh, refreshTokenExp: finalExp } });
 
-    // Si es proveedor, crear perfil vacío + generar embedding inicial
-    if (user.rol === 'PROVEEDOR') {
-      const profile = await prisma.providerProfile.create({ data: { userId: user.id } });
-      updateProviderEmbedding(profile.id).catch(() => {});
-    }
+    if (profileId) updateProviderEmbedding(profileId).catch(() => {});
 
     // Emails (fire-and-forget)
     email.bienvenida({ email: user.email, nombre: user.nombre, rol: user.rol });
@@ -183,6 +197,12 @@ router.post('/login', async (req, res) => {
 
     const { accessToken, rawRefresh, refreshToken, refreshTokenExp } = issueTokens(user);
     await prisma.user.update({ where: { id: user.id }, data: { refreshToken, refreshTokenExp } });
+
+    if (user.rol === 'PROVEEDOR') {
+      ensureProviderProfile(user.id)
+        .then((profile) => updateProviderEmbedding(profile.id))
+        .catch(() => {});
+    }
 
     res.json({
       token:        accessToken,

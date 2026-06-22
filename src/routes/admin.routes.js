@@ -1768,4 +1768,6 @@ router.get('/security', verifyToken, soloAdmin, async (req, res) => {
   }
 });
 
+router.use('/catalog', require('./admin.catalog.routes'));
+
 module.exports = router;

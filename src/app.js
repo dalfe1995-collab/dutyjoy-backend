@@ -37,7 +37,7 @@ app.use(helmet({
 
 const allowedOrigins = process.env.ALLOWED_ORIGINS
   ? process.env.ALLOWED_ORIGINS.split(',').map(o => o.trim())
-  : ['http://localhost:5173', 'http://localhost:3001'];
+  : ['http://localhost:3000', 'http://localhost:3001', 'http://localhost:5173'];
 
 app.use(cors({
   origin: (origin, cb) => {
@@ -96,7 +96,7 @@ app.use('/chat', chatLimiter);
 app.use((req, res, next) => {
   if (req.method === 'GET') {
     // Public provider/service lists → 60s shared cache
-    if (/^\/(providers|services)(\?|\/|$)/.test(req.path)) {
+    if (/^\/(providers|services|cities)(\?|\/|$)/.test(req.path)) {
       res.set('Cache-Control', 'public, max-age=60, stale-while-revalidate=120');
     }
     // Health check → 30s
@@ -117,10 +117,16 @@ app.use((req, res, next) => {
   req.requestId = id;
   res.set('X-Request-ID', id);
   const start = Date.now();
+  const end = res.end;
+  res.end = function (...args) {
+    const ms = Date.now() - start;
+    if (!res.headersSent) {
+      res.setHeader('X-Response-Time', `${ms}ms`);
+    }
+    return end.apply(this, args);
+  };
   res.on('finish', () => {
     const ms = Date.now() - start;
-    res.set('X-Response-Time', `${ms}ms`);
-    // Log slow requests (> 800ms) outside of test env
     if (ms > 800 && process.env.NODE_ENV !== 'test') {
       console.warn(`[SLOW] ${req.method} ${req.path} — ${ms}ms (reqId: ${id})`);
     }
@@ -143,6 +149,7 @@ app.use(express.json({ limit: '10kb' }));
 app.use('/auth',          require('./routes/auth.routes'));
 app.use('/providers',     require('./routes/providers.routes'));
 app.use('/services',      require('./routes/services.routes'));
+app.use('/cities',        require('./routes/cities.routes'));
 app.use('/bookings',      require('./routes/bookings.routes'));
 app.use('/reviews',       require('./routes/reviews.routes'));
 app.use('/payments',      require('./routes/payments.routes'));

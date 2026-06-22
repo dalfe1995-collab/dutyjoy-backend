@@ -3,7 +3,7 @@ const verifyToken = require('../middleware/verifyToken');
 const prisma = require('../lib/prisma');
 const email = require('../lib/email');
 const OpenAI = require('openai');
-const { SERVICIOS_IDS } = require('./services.routes');
+const { getServiceIds } = require('../lib/catalog');
 const { updateProviderEmbedding, semanticSearch } = require('../lib/embeddings');
 
 const openai = process.env.OPENAI_API_KEY ? new OpenAI({ apiKey: process.env.OPENAI_API_KEY }) : null;
@@ -201,6 +201,7 @@ router.put('/me', verifyToken, async (req, res) => {
       if (!Array.isArray(servicios)) {
         return res.status(400).json({ error: 'servicios debe ser un array' });
       }
+      const SERVICIOS_IDS = await getServiceIds();
       const invalidos = servicios.filter(s => !SERVICIOS_IDS.includes(s));
       if (invalidos.length > 0) {
         return res.status(400).json({ error: `Servicios no válidos: ${invalidos.join(', ')}. Válidos: ${SERVICIOS_IDS.join(', ')}` });
