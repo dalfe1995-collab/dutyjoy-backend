@@ -24,7 +24,13 @@ jobs:
         run: npx prisma generate
 
       - name: Database migrate & seed catalog
-        run: npm run db:deploy
+        run: |
+          if [ -z "$DIRECT_URL" ]; then
+            echo "::error::DIRECT_URL secret is required for prisma migrate deploy (Supabase direct connection, port 5432)"
+            exit 1
+          fi
+          npx prisma migrate deploy
+          node scripts/seed-catalog.js
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           DIRECT_URL: ${{ secrets.DIRECT_URL }}

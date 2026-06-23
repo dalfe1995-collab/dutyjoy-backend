@@ -1,6 +1,6 @@
 {
   "version": 2,
-  "buildCommand": "npx prisma generate && node scripts/seed-catalog.js",
+  "buildCommand": "npx prisma generate",
   "rewrites": [
     { "source": "/(.*)", "destination": "/api" }
   ],
