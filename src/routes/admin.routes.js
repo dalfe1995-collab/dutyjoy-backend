@@ -631,6 +631,10 @@ router.patch('/bookings/:id', verifyToken, soloAdmin, async (req, res) => {
       data: { estado },
     });
 
+    if (estado === 'COMPLETADO') {
+      require('../lib/loyalty').onBookingCompleted(booking.clienteId).catch(() => {});
+    }
+
     res.json({ mensaje: 'Reserva actualizada', booking });
   } catch (error) {
     console.error(error);

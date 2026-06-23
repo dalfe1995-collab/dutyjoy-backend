@@ -29,7 +29,7 @@ router.post('/', verifyToken, async (req, res) => {
       return res.status(403).json({ error: 'Solo los clientes pueden crear reservas' });
     }
 
-    const { proveedorId, tipoServicio, descripcion, fechaServicio, duracionHoras, recurrencia } = req.body;
+    const { proveedorId, tipoServicio, descripcion, fechaServicio, duracionHoras, recurrencia, cuponCodigo } = req.body;
 
     const RECURRENCIAS_VALIDAS = ['UNICA', 'SEMANAL', 'QUINCENAL', 'MENSUAL'];
     const recurrenciaFinal = recurrencia && RECURRENCIAS_VALIDAS.includes(recurrencia) ? recurrencia : 'UNICA';
@@ -108,7 +108,21 @@ router.post('/', verifyToken, async (req, res) => {
       });
     }
 
-    const precioTotal    = proveedor.tarifaPorHora * horas;
+    const precioBruto     = proveedor.tarifaPorHora * horas;
+    let descuentoCupon    = 0;
+    let codigoAplicado    = null;
+
+    if (cuponCodigo?.trim()) {
+      const { validateCoupon } = require('../lib/coupons');
+      const couponResult = await validateCoupon(cuponCodigo, precioBruto);
+      if (!couponResult.valid) {
+        return res.status(400).json({ error: couponResult.error });
+      }
+      descuentoCupon = couponResult.descuento;
+      codigoAplicado = couponResult.cupon.codigo;
+    }
+
+    const precioTotal     = Math.max(0, precioBruto - descuentoCupon);
     const comisionDutyJoy = precioTotal * parseFloat(process.env.COMMISSION_RATE || 0.15);
 
     // ── Instant booking: si el proveedor lo activa, la reserva va directo a CONFIRMADO ──
@@ -123,6 +137,8 @@ router.post('/', verifyToken, async (req, res) => {
         fechaServicio: new Date(fechaServicio),
         duracionHoras: horas,
         precioTotal,
+        descuentoCupon: descuentoCupon || 0,
+        cuponCodigo: codigoAplicado,
         comisionDutyJoy,
         estado: estadoInicial,
         recurrencia: recurrenciaFinal,
@@ -132,6 +148,11 @@ router.post('/', verifyToken, async (req, res) => {
         cliente:   { select: { nombre: true, email: true } },
       },
     });
+
+    if (codigoAplicado) {
+      const { applyCoupon } = require('../lib/coupons');
+      applyCoupon(codigoAplicado).catch(() => {});
+    }
 
     // ── Emails ─────────────────────────────────────────────────────────
     const fechaFmt = formatFecha(fechaServicio);
@@ -304,6 +325,75 @@ router.get('/stats', verifyToken, async (req, res) => {
   }
 });
 
+// PATCH /bookings/:id/coupon — aplicar cupón antes de pagar
+router.patch('/:id/coupon', verifyToken, async (req, res) => {
+  try {
+    if (req.user.rol !== 'CLIENTE') {
+      return res.status(403).json({ error: 'Solo el cliente puede aplicar cupones' });
+    }
+
+    const { cuponCodigo } = req.body;
+    if (!cuponCodigo?.trim()) {
+      return res.status(400).json({ error: 'Código de cupón requerido' });
+    }
+
+    const booking = await prisma.booking.findUnique({
+      where: { id: req.params.id },
+      include: {
+        proveedor: { select: { tarifaPorHora: true } },
+        pagos: { where: { tipo: 'CLIENTE_RECIBIDO', estado: 'COMPLETADO' }, take: 1 },
+      },
+    });
+
+    if (!booking) return res.status(404).json({ error: 'Reserva no encontrada' });
+    if (booking.clienteId !== req.user.id) return res.status(403).json({ error: 'No autorizado' });
+    if (!['PENDIENTE', 'CONFIRMADO'].includes(booking.estado)) {
+      return res.status(400).json({ error: 'No se puede aplicar cupón a esta reserva' });
+    }
+    if (booking.pagos.length > 0) {
+      return res.status(400).json({ error: 'Esta reserva ya fue pagada' });
+    }
+    if (booking.cuponCodigo) {
+      return res.status(400).json({ error: 'Ya hay un cupón aplicado a esta reserva' });
+    }
+
+    const precioBruto = booking.proveedor.tarifaPorHora * booking.duracionHoras;
+    const { validateCoupon, applyCoupon } = require('../lib/coupons');
+    const couponResult = await validateCoupon(cuponCodigo, precioBruto);
+    if (!couponResult.valid) {
+      return res.status(400).json({ error: couponResult.error });
+    }
+
+    const precioTotal = couponResult.montoFinal;
+    const comisionDutyJoy = precioTotal * parseFloat(process.env.COMMISSION_RATE || 0.15);
+
+    const updated = await prisma.booking.update({
+      where: { id: booking.id },
+      data: {
+        precioTotal,
+        descuentoCupon: couponResult.descuento,
+        cuponCodigo: couponResult.cupon.codigo,
+        comisionDutyJoy,
+      },
+      include: {
+        cliente: { select: { nombre: true, email: true, telefono: true } },
+        proveedor: { include: { user: { select: { nombre: true, ciudad: true } } } },
+      },
+    });
+
+    applyCoupon(couponResult.cupon.codigo).catch(() => {});
+
+    res.json({
+      booking: updated,
+      descuento: couponResult.descuento,
+      mensaje: `Cupón ${couponResult.cupon.codigo} aplicado`,
+    });
+  } catch (error) {
+    console.error('[bookings/:id/coupon]', error);
+    res.status(500).json({ error: 'Error al aplicar cupón' });
+  }
+});
+
 // GET /bookings/:id — detalle de una reserva
 router.get('/:id', verifyToken, async (req, res) => {
   try {
@@ -414,6 +504,7 @@ router.patch('/:id/status', verifyToken, async (req, res) => {
       });
       // Create 48h-window payout record for provider
       getCreateProviderPayout()(req.params.id).catch(e => console.error('[payout]', e.message));
+      require('../lib/loyalty').onBookingCompleted(booking.clienteId).catch(e => console.error('[loyalty]', e.message));
     }
 
     if (estado === 'CANCELADO') {

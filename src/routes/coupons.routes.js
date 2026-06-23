@@ -11,22 +11,7 @@ const soloAdmin = (req, res, next) => {
   next();
 };
 
-const DEMO_COUPONS = [
-  { codigo:'DUTYJOY10',   tipo:'porcentaje', valor:10,    descripcion:'10% de descuento — bienvenida',         maxUsos:null,  montoMinimo:50000  },
-  { codigo:'PRIMERA20',   tipo:'porcentaje', valor:20,    descripcion:'20% de descuento en tu primera reserva', maxUsos:500,   montoMinimo:80000  },
-  { codigo:'HOGAR15',     tipo:'porcentaje', valor:15,    descripcion:'15% off en servicios del hogar',         maxUsos:200,   montoMinimo:60000  },
-  { codigo:'BIENVENIDO',  tipo:'fijo',       valor:20000, descripcion:'$20.000 de descuento fijo',              maxUsos:100,   montoMinimo:80000  },
-  { codigo:'VIP30',       tipo:'porcentaje', valor:30,    descripcion:'30% clientes VIP',                       maxUsos:50,    montoMinimo:150000 },
-  { codigo:'REFERIDO',    tipo:'fijo',       valor:15000, descripcion:'$15.000 por referido',                   maxUsos:null,  montoMinimo:50000  },
-  { codigo:'QUINCENA',    tipo:'porcentaje', valor:12,    descripcion:'12% de descuento de quincena',           maxUsos:300,   montoMinimo:40000  },
-];
-
-async function seedIfEmpty() {
-  const count = await prisma.cupon.count();
-  if (count === 0) {
-    await prisma.cupon.createMany({ data: DEMO_COUPONS });
-  }
-}
+const { seedIfEmpty, validateCoupon, applyCoupon } = require('../lib/coupons');
 
 /* ── Validate (public — any authenticated user) ──────────────────────────── */
 router.post('/validate', verifyToken, async (req, res) => {
@@ -35,44 +20,26 @@ router.post('/validate', verifyToken, async (req, res) => {
 
   await seedIfEmpty();
 
-  const cupon = await prisma.cupon.findUnique({ where: { codigo: codigo.trim().toUpperCase() } });
-  if (!cupon) return res.status(404).json({ error: 'Cupón no válido' });
-  if (!cupon.activo) return res.status(400).json({ error: 'Este cupón está inactivo' });
-  if (cupon.expira && new Date(cupon.expira) < new Date()) return res.status(400).json({ error: 'Este cupón ha expirado' });
-  if (cupon.maxUsos !== null && cupon.usos >= cupon.maxUsos) return res.status(400).json({ error: 'Este cupón ha alcanzado su límite de usos' });
-  if (cupon.montoMinimo && monto && monto < cupon.montoMinimo) {
-    return res.status(400).json({ error: `Monto mínimo para este cupón: $${cupon.montoMinimo.toLocaleString('es-CO')} COP` });
+  const result = await validateCoupon(codigo, monto);
+  if (!result.valid) {
+    const status = result.error === 'Cupón no válido' ? 404 : 400;
+    return res.status(status).json({ error: result.error });
   }
 
-  const descuento = cupon.tipo === 'porcentaje'
-    ? Math.round((monto || 0) * (cupon.valor / 100))
-    : cupon.valor;
-
   res.json({
-    valido:      true,
-    cupon: {
-      id:         cupon.id,
-      codigo:     cupon.codigo,
-      tipo:       cupon.tipo,
-      valor:      cupon.valor,
-      descripcion: cupon.descripcion,
-    },
-    descuento,
-    montoFinal: Math.max(0, (monto || 0) - descuento),
+    valido: true,
+    cupon: result.cupon,
+    descuento: result.descuento,
+    montoFinal: result.montoFinal,
   });
 });
 
 /* ── Apply (increment usage) — called when booking is confirmed ─────────── */
 router.post('/apply', verifyToken, async (req, res) => {
   const { codigo } = req.body;
-  if (!codigo) return res.status(400).json({ ok: true }); // silent if no coupon
-  try {
-    await prisma.cupon.update({
-      where: { codigo: codigo.trim().toUpperCase() },
-      data: { usos: { increment: 1 } },
-    });
-    res.json({ ok: true });
-  } catch { res.json({ ok: true }); } // silent fail — don't block booking
+  if (!codigo) return res.json({ ok: true });
+  await applyCoupon(codigo);
+  res.json({ ok: true });
 });
 
 /* ── Featured coupons (for dashboard widget — only shows generic ones) ──── */

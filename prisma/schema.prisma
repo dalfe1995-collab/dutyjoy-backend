@@ -420,6 +420,8 @@ model Booking {
   fechaServicio   DateTime
   duracionHoras   Float           @default(2)
   precioTotal     Float
+  descuentoCupon  Float?          @default(0)
+  cuponCodigo     String?
   comisionDutyJoy Float
   estado          EstadoBooking   @default(PENDIENTE)
   recurrencia     Recurrencia     @default(UNICA)     // frecuencia de repetición

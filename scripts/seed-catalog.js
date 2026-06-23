@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 /**
  * Pobla ServiceCatalog y CityCatalog desde los datos canónicos.
- * Uso: node scripts/seed-catalog.js
+ * Idempotente (upsert) — seguro en cada deploy.
  */
+require('dotenv').config();
 const { PrismaClient } = require('@prisma/client');
 const { FALLBACK_SERVICES, FALLBACK_CITIES } = require('../src/lib/catalog');
 

@@ -176,6 +176,8 @@ async function completarReservasFinalizadas() {
         data:  { reservasCompletadas: { increment: 1 } },
       }).catch(() => {});
 
+      require('./loyalty').onBookingCompleted(reserva.clienteId).catch(() => {});
+
       console.log(`[CRON] Reserva auto-completada → ${reserva.id}`);
       completadas++;
     }

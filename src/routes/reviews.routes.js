@@ -71,6 +71,8 @@ router.post('/', verifyToken, async (req, res) => {
       comentario,
     }).catch(() => {});
 
+    require('../lib/loyalty').syncUserLoyalty(req.user.id).catch(() => {});
+
     res.status(201).json({ mensaje: 'Reseña publicada', review });
   } catch (error) {
     console.error(error);

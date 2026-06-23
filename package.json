@@ -11,6 +11,7 @@
     "test:coverage": "jest --coverage --runInBand --forceExit",
     "db:migrate": "npx prisma migrate dev",
     "db:studio": "npx prisma studio",
+    "db:deploy": "npx prisma migrate deploy && node scripts/seed-catalog.js",
     "seed:admin": "node scripts/seed-admin.js",
     "seed:catalog": "node scripts/seed-catalog.js"
   },
